@@ -3,21 +3,96 @@ title: Claude 系列
 description: claude-opus-4.8 / claude-sonnet-5 等 Claude CLI 可用模型的 bytestream 对接说明
 ---
 
-<Callout type="warn" title="内容撰写中">
-  本页为框架骨架，具体的对接必读（如 system 独立字段处理）、模型专属参数、请求/响应示例由后续内容里程碑补充。
-  下方 API 参考区块已可用。
-</Callout>
+本页覆盖 bytestream 通过 `POST /v1/chat/completions`（见[通用说明](/docs/text)）暴露的 Claude 系列模型。
+请求/响应外层结构与 OpenAI 标准一致，网关内部会自动完成到 Claude 原生 Messages API 的双向转换；对接方唯一
+需要注意的是下方「对接必读」中的 `system` 字段处理方式。
 
 ## 模型清单
 
 | 模型 | 说明 |
 | --- | --- |
-| `claude-opus-4.8` | Claude CLI 可用模型 |
-| `claude-sonnet-5` | Claude CLI 可用模型 |
+| `claude-opus-4.8` | 高能力档位。bytestream 侧对外命名，通过「渠道 → 自定义模型」映射到上游具体模型，具体上游模型请以控制台当前配置为准。 |
+| `claude-sonnet-5` | 均衡能力档位，用法与 `claude-opus-4.8` 一致。 |
 
 ## 对接必读
 
-_TODO：与 OpenAI 标准的差异点（system 独立字段等）将在此补充。_
+- **`system` 消息会被单独提取，而非放进 `messages` 数组**：OpenAI 标准里 system 提示以
+  `{"role": "system", "content": "..."}` 形式作为 `messages` 数组的第一条消息传入；Claude 原生 API 则要求
+  system 提示放在请求体顶层独立的 `system` 字段。bytestream 网关会自动识别 `messages` 中 `role: "system"`
+  的消息，将其内容提取并转换为 Claude 请求的顶层 `system` 字段，再转发给上游——**对接方仍按 OpenAI 标准传参
+  即可，无需自行改造**，这一转换在网关内部完成，属于实现细节说明而非需要额外操作的步骤。
+- **响应结构保持 OpenAI 兼容**：`choices[].message.content` 等字段与其余系列一致，无需按 Claude 原生响应格式
+  （`content` 数组、`stop_reason` 等）解析。
+
+## 请求示例
+
+<Tabs items={['非流式请求', '流式请求']}>
+  <Tab value="非流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "claude-opus-4.8",
+        "messages": [
+          { "role": "system", "content": "你是一个简洁的技术助手，回答不超过两句话。" },
+          { "role": "user", "content": "用一句话介绍一下你自己" }
+        ]
+      }'
+    ```
+
+    响应：
+
+    ```json
+    {
+      "id": "chatcmpl-9a1d4e2c",
+      "object": "chat.completion",
+      "created": 1738000100,
+      "model": "claude-opus-4.8",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "我是 Claude，一个由 Anthropic 打造的对话助手，专注于给出清晰、可靠的回答。"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": { "prompt_tokens": 20, "completion_tokens": 22, "total_tokens": 42 }
+    }
+    ```
+  </Tab>
+  <Tab value="流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "claude-opus-4.8",
+        "messages": [
+          { "role": "system", "content": "你是一个简洁的技术助手，回答不超过两句话。" },
+          { "role": "user", "content": "用一句话介绍一下你自己" }
+        ],
+        "stream": true
+      }'
+    ```
+
+    响应（`text/event-stream`，逐块推送）：
+
+    ```
+    data: {"id":"chatcmpl-9a1d4e2c","object":"chat.completion.chunk","created":1738000100,"model":"claude-opus-4.8","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-9a1d4e2c","object":"chat.completion.chunk","created":1738000100,"model":"claude-opus-4.8","choices":[{"index":0,"delta":{"content":"我是 Claude"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-9a1d4e2c","object":"chat.completion.chunk","created":1738000100,"model":"claude-opus-4.8","choices":[{"index":0,"delta":{"content":"，一个由 Anthropic 打造的对话助手"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-9a1d4e2c","object":"chat.completion.chunk","created":1738000100,"model":"claude-opus-4.8","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+    data: [DONE]
+    ```
+  </Tab>
+</Tabs>
 
 ## API 参考
 

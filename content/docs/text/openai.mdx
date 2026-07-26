@@ -3,20 +3,91 @@ title: OpenAI 系列
 description: gpt-5.6 / gpt-5.5 等 codex 可用模型的 bytestream 对接说明
 ---
 
-<Callout type="warn" title="内容撰写中">
-  本页为框架骨架，具体的对接必读、模型专属参数、请求/响应示例由后续内容里程碑补充。下方 API 参考区块已可用。
-</Callout>
+本页覆盖 bytestream 通过 `POST /v1/chat/completions`（见[通用说明](/docs/text)）暴露的 OpenAI 兼容系列模型。
+本系列与 OpenAI 官方标准完全兼容，无需额外的字段转换，是理解 bytestream 文本接口的基准参照。
 
 ## 模型清单
 
 | 模型 | 说明 |
 | --- | --- |
-| `gpt-5.6` | codex 可用模型 |
-| `gpt-5.5` | codex 可用模型 |
+| `gpt-5.6` | 综合能力档位。bytestream 侧对外命名，通过「渠道 → 自定义模型」映射到上游具体模型，具体上游模型请以控制台当前配置为准。 |
+| `gpt-5.5` | 前一代综合能力档位，用法与 `gpt-5.6` 一致。 |
 
 ## 对接必读
 
-_TODO：与 OpenAI 标准的差异点（如有）将在此补充。_
+- **与 OpenAI 官方标准完全兼容**：请求体、响应体结构、流式分块格式均直接遵循
+  [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat)，无需任何额外转换或适配，
+  可直接复用官方 SDK（`openai` Python/Node 包等）指向 bytestream 网关地址即可使用。
+- **`model` 字段决定路由**：本系列没有需要单独说明的专属参数或字段差异，通用说明页的鉴权、端点、流式/非流式
+  响应结构、错误码对本系列直接生效。
+
+## 请求示例
+
+<Tabs items={['非流式请求', '流式请求']}>
+  <Tab value="非流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "gpt-5.6",
+        "messages": [
+          { "role": "user", "content": "用一句话介绍一下你自己" }
+        ]
+      }'
+    ```
+
+    响应：
+
+    ```json
+    {
+      "id": "chatcmpl-8f3c2a1b",
+      "object": "chat.completion",
+      "created": 1738000000,
+      "model": "gpt-5.6",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "我是一个基于 GPT 架构的对话助手，可以帮你解答问题、编写代码、整理信息。"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": { "prompt_tokens": 12, "completion_tokens": 24, "total_tokens": 36 }
+    }
+    ```
+  </Tab>
+  <Tab value="流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "gpt-5.6",
+        "messages": [
+          { "role": "user", "content": "用一句话介绍一下你自己" }
+        ],
+        "stream": true
+      }'
+    ```
+
+    响应（`text/event-stream`，逐块推送）：
+
+    ```
+    data: {"id":"chatcmpl-8f3c2a1b","object":"chat.completion.chunk","created":1738000000,"model":"gpt-5.6","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-8f3c2a1b","object":"chat.completion.chunk","created":1738000000,"model":"gpt-5.6","choices":[{"index":0,"delta":{"content":"我是"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-8f3c2a1b","object":"chat.completion.chunk","created":1738000000,"model":"gpt-5.6","choices":[{"index":0,"delta":{"content":"一个基于 GPT 架构的对话助手"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-8f3c2a1b","object":"chat.completion.chunk","created":1738000000,"model":"gpt-5.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+    data: [DONE]
+    ```
+  </Tab>
+</Tabs>
 
 ## API 参考
 

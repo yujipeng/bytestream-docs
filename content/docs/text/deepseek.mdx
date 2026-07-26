@@ -3,21 +3,94 @@ title: Deepseek 系列
 description: deepseek-v4-pro / deepseek-v4-flash 的 bytestream 对接说明
 ---
 
-<Callout type="warn" title="内容撰写中">
-  本页为框架骨架，具体的对接必读（如 reasoning_content 字段）、模型专属参数、请求/响应示例由后续内容里程碑补充。
-  下方 API 参考区块已可用。
-</Callout>
+本页覆盖 bytestream 通过 `POST /v1/chat/completions`（见[通用说明](/docs/text)）暴露的 Deepseek 系列模型。
+请求结构与 OpenAI 标准一致；响应中会额外携带 `reasoning_content` 字段承载模型的思考过程，是本系列唯一需要
+额外处理的差异点。
 
 ## 模型清单
 
 | 模型 | 说明 |
 | --- | --- |
-| `deepseek-v4-pro` | Deepseek 系列 |
-| `deepseek-v4-flash` | Deepseek 系列 |
+| `deepseek-v4-pro` | 完整推理能力档位。bytestream 侧对外命名，通过「渠道 → 自定义模型」映射到上游具体模型，具体上游模型请以控制台当前配置为准。 |
+| `deepseek-v4-flash` | 轻量/低延迟档位，用法与 `deepseek-v4-pro` 一致。 |
 
 ## 对接必读
 
-_TODO：reasoning_content 字段等与 OpenAI 标准的差异点将在此补充。_
+- **`reasoning_content` 字段**：Deepseek 推理类模型在生成最终回答前会产出一段思考过程，网关将其映射到 OpenAI
+  兼容响应结构中的 `reasoning_content` 字段（非流式响应位于 `choices[].message.reasoning_content`；流式响应
+  位于每个分块的 `choices[].delta.reasoning_content`），与最终答案的 `content` 字段分开返回。对接方如不需要
+  展示思考过程，忽略该字段即可，不影响 `content` 的正常解析。
+- **流式场景下的顺序**：思考内容通常先于最终答案分块推送——即先收到若干个只带 `reasoning_content` 的分块，
+  再收到带 `content` 的分块，拼接展示时按接收顺序处理即可。
+
+## 请求示例
+
+<Tabs items={['非流式请求', '流式请求']}>
+  <Tab value="非流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "deepseek-v4-pro",
+        "messages": [
+          { "role": "user", "content": "9.11 和 9.9 哪个更大？" }
+        ]
+      }'
+    ```
+
+    响应（含 `reasoning_content`）：
+
+    ```json
+    {
+      "id": "chatcmpl-b21f8c3d",
+      "object": "chat.completion",
+      "created": 1738000200,
+      "model": "deepseek-v4-pro",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "reasoning_content": "将两数按小数位对齐比较：9.11 的十分位是 1，9.9 的十分位是 9，9 大于 1，因此 9.9 更大。",
+            "content": "9.9 更大。"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": { "prompt_tokens": 14, "completion_tokens": 38, "total_tokens": 52 }
+    }
+    ```
+  </Tab>
+  <Tab value="流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "deepseek-v4-pro",
+        "messages": [
+          { "role": "user", "content": "9.11 和 9.9 哪个更大？" }
+        ],
+        "stream": true
+      }'
+    ```
+
+    响应（`text/event-stream`，`reasoning_content` 分块先于 `content` 分块推送）：
+
+    ```
+    data: {"id":"chatcmpl-b21f8c3d","object":"chat.completion.chunk","created":1738000200,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":""},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-b21f8c3d","object":"chat.completion.chunk","created":1738000200,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"reasoning_content":"将两数按小数位对齐比较……"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-b21f8c3d","object":"chat.completion.chunk","created":1738000200,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"9.9 更大。"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-b21f8c3d","object":"chat.completion.chunk","created":1738000200,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+    data: [DONE]
+    ```
+  </Tab>
+</Tabs>
 
 ## API 参考
 

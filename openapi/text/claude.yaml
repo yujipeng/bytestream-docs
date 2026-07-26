@@ -1,12 +1,12 @@
 openapi: 3.1.0
 info:
   title: bytestream · Claude 系列（文本生成）
-  version: 0.1.0-skeleton
+  version: 0.1.0
   license:
     name: Proprietary
   description: |
-    通过 bytestream 网关调用的 Claude 兼容系列模型。参考页壳，字段定义为骨架，
-    具体的模型专属参数（如 system 独立字段处理方式）由后续内容里程碑补充。
+    通过 bytestream 网关调用的 Claude 系列模型。网关自动将 messages 中的 system 消息转换为 Claude
+    原生请求的顶层 system 字段，对接方按 OpenAI 标准传参即可，详见 /docs/text/claude。
 servers:
   - url: https://aiapi.bytestream.com.cn
     description: bytestream 网关
