@@ -1,0 +1,238 @@
+openapi: 3.1.0
+info:
+  title: bytestream · Doubao Seedance 2.0（视频生成）
+  version: 0.1.0-skeleton
+  license:
+    name: Proprietary
+  description: |
+    通过 bytestream 网关调用的豆包 Seedance 2.0 系列视频生成模型（标准版 / fast / mini）。
+    异步任务型接口：先 POST 提交任务拿到 task_id，再 GET 轮询任务状态。
+servers:
+  - url: https://aiapi.bytestream.com.cn
+    description: bytestream 网关
+security:
+  - bearerAuth: []
+paths:
+  /v1/videos:
+    post:
+      summary: 提交视频生成任务（Seedance 系列）
+      description: |
+        提交一个异步视频生成任务。Seedance 专属参数（分辨率、画面比例、随机种子、首尾帧等）
+        全部嵌套在 `metadata` 对象内，详见请求体 schema 与文档「01 · 请求参数详解」一节。
+      operationId: createVideoTaskSeedance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SeedanceVideoRequest'
+      responses:
+        '200':
+          description: 任务提交成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoTask'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/InsufficientQuota'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/videos/{task_id}:
+    get:
+      summary: 查询视频生成任务状态（Seedance 系列）
+      description: OpenAI Video API 兼容格式查询。状态机：queued → in_progress → completed / failed。
+      operationId: getVideoTaskSeedance
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoTask'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: sk-xxxxxxxx
+  schemas:
+    SeedanceVideoRequest:
+      type: object
+      required: [model, prompt]
+      properties:
+        model:
+          type: string
+          enum:
+            - doubao-seedance-2-0
+            - doubao-seedance-2-0-fast
+            - doubao-seedance-2-0-mini
+          description: 标准版 / 快速版 / 迷你版
+        prompt:
+          type: string
+          description: 视频内容文本描述
+        image:
+          type: string
+          description: 图生视频的单张参考图 URL
+        images:
+          type: array
+          items:
+            type: string
+          description: 多张参考图 URL，不带角色区分；需要角色化参考内容请改用 metadata.content
+        duration:
+          type: integer
+          minimum: 4
+          maximum: 15
+          description: 期望时长（秒），Seedance 2.0 全系列（含 fast/mini）范围为 4~15 秒
+        seconds:
+          type: string
+          description: 与 duration 等效的字符串写法
+        metadata:
+          type: object
+          description: Seedance 专属参数容器
+          properties:
+            resolution:
+              type: string
+              enum: [480p, 720p, 1080p, 4k]
+              default: 720p
+              description: 1080p 与 4k 仅标准版 doubao-seedance-2-0 支持
+            ratio:
+              type: string
+              enum: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9', adaptive]
+            duration:
+              type: integer
+              minimum: 4
+              maximum: 15
+              description: |
+                与顶层 duration/seconds 等效的另一种写法，会被顶层字段覆盖，二选一即可，
+                不要同时传递不同的值。Seedance 2.0 全系列（含 fast/mini）范围均为 4~15 秒。
+            seed:
+              type: integer
+              description: Seedance 2.0 系列（含 fast/mini）暂不支持，传入会被忽略
+            generate_audio:
+              type: boolean
+              default: true
+            return_last_frame:
+              type: boolean
+              default: false
+            camera_fixed:
+              type: boolean
+              description: Seedance 2.0 系列（含 fast/mini）暂不支持，传入会被忽略
+            watermark:
+              type: boolean
+              default: false
+            service_tier:
+              type: string
+              default: default
+            priority:
+              type: integer
+              minimum: 0
+              maximum: 9
+              default: 0
+            execution_expires_after:
+              type: integer
+              minimum: 3600
+              maximum: 259200
+              default: 172800
+            safety_identifier:
+              type: string
+            tools:
+              type: array
+              items:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum: [web_search]
+            callback_url:
+              type: string
+            content:
+              type: array
+              description: 多模态内容直通数组，用于精确表达首尾帧、参考图角色、参考视频/音频
+              items:
+                $ref: '#/components/schemas/ContentItem'
+    ContentItem:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [text, image_url, video_url, audio_url]
+        text:
+          type: string
+        image_url:
+          type: object
+          properties:
+            url:
+              type: string
+        video_url:
+          type: object
+          properties:
+            url:
+              type: string
+        audio_url:
+          type: object
+          properties:
+            url:
+              type: string
+        role:
+          type: string
+          enum: [first_frame, last_frame, reference_image, reference_video, reference_audio]
+    VideoTask:
+      type: object
+      properties:
+        id:
+          type: string
+        task_id:
+          type: string
+        object:
+          type: string
+          example: video
+        model:
+          type: string
+        status:
+          type: string
+          enum: [queued, in_progress, completed, failed]
+        progress:
+          type: integer
+        created_at:
+          type: integer
+        completed_at:
+          type: integer
+        metadata:
+          type: object
+          properties:
+            url:
+              type: string
+              description: 生成完成后的视频地址（注意不是顶层 url 字段）
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+            code:
+              type: string
+  responses:
+    BadRequest:
+      description: 参数错误
+    Unauthorized:
+      description: 令牌无效
+    InsufficientQuota:
+      description: 额度不足
+    NotFound:
+      description: 任务不存在
+    RateLimited:
+      description: 触发限流

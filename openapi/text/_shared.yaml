@@ -1,0 +1,16 @@
+# 文本生成系列共享 OpenAPI 组件。
+# 仅供其他 yaml 通过 $ref 引用，不是独立的 OpenAPI 文档，已在 lib/openapi.ts 与
+# scripts/generate-openapi.mjs 的 glob 中排除（文件名以下划线开头）。
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: sk-xxxxxxxx
+  responses:
+    BadRequest:
+      description: 参数错误
+    Unauthorized:
+      description: 令牌无效
+    RateLimited:
+      description: 触发限流

@@ -1,0 +1,194 @@
+openapi: 3.1.0
+info:
+  title: bytestream · HappyHorse（视频生成）
+  version: 0.1.0-skeleton
+  license:
+    name: Proprietary
+  description: |
+    通过 bytestream 网关调用的 HappyHorse 系列视频生成模型（t2v / i2v / r2v / video-edit）。
+    异步任务型接口：先 POST 提交任务拿到 task_id，再 GET 轮询任务状态。
+    参数结构与 Seedance 系列不同：所有专属参数嵌套在 metadata.input / metadata.parameters 下，
+    详见文档「对接必读」一节的 6 条关键差异。
+servers:
+  - url: https://aiapi.bytestream.com.cn
+    description: bytestream 网关
+security:
+  - bearerAuth: []
+paths:
+  /v1/videos:
+    post:
+      summary: 提交视频生成任务（HappyHorse 系列）
+      description: |
+        提交一个异步视频生成任务。i2v / r2v / video-edit 场景下，参考素材必须放在
+        `metadata.input.media`（顶层 image/images 对该系列无效）；生成参数放在 `metadata.parameters`。
+      operationId: createVideoTaskHappyHorse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HappyHorseVideoRequest'
+      responses:
+        '200':
+          description: 任务提交成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoTask'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/InsufficientQuota'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/videos/{task_id}:
+    get:
+      summary: 查询视频生成任务状态（HappyHorse 系列）
+      description: 与 Seedance 系列共用同一套查询格式与状态机：queued → in_progress → completed / failed。
+      operationId: getVideoTaskHappyHorse
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoTask'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: sk-xxxxxxxx
+  schemas:
+    HappyHorseVideoRequest:
+      type: object
+      required: [model, metadata]
+      properties:
+        model:
+          type: string
+          enum:
+            - happyhorse-1.1-t2v
+            - happyhorse-1.0-t2v
+            - happyhorse-1.1-i2v
+            - happyhorse-1.0-i2v
+            - happyhorse-1.1-r2v
+            - happyhorse-1.0-r2v
+            - happyhorse-1.0-video-edit
+        prompt:
+          type: string
+          description: t2v 场景下文本描述，建议放在顶层
+        size:
+          type: string
+          description: |
+            不建议使用。t2v 场景若要传必须是 "宽*高" 格式（如 "1280*720"）；
+            推荐改用 metadata.parameters.resolution。
+        metadata:
+          type: object
+          required: [parameters]
+          description: |
+            HappyHorse 的核心参数容器。parameters 始终必填；input 仅在 i2v / r2v / video-edit
+            场景下必填（此时 input.media 也必填，用于承载参考图片/视频），纯 t2v（model 含 -t2v
+            后缀）场景可以完全省略 input，仅靠顶层 prompt 驱动生成。
+          properties:
+            input:
+              type: object
+              description: |
+                i2v / r2v / video-edit 场景下必填；纯 t2v 场景可省略整个对象。
+              properties:
+                prompt:
+                  type: string
+                  description: 与顶层 prompt 二选一，同时传入以顶层为准
+                media:
+                  type: array
+                  description: |
+                    i2v / r2v / video-edit 场景下必填的参考素材数组（t2v 场景不适用，
+                    该场景没有参考图片/视频）。
+                  items:
+                    $ref: '#/components/schemas/MediaItem'
+            parameters:
+              type: object
+              properties:
+                resolution:
+                  type: string
+                  enum: [720P, 1080P]
+                  default: 720P
+                  description: 省略时默认 720P（不是 1080P）；720P/1080P 当前计费相同
+                ratio:
+                  type: string
+                  enum: ['16:9', '9:16', '1:1', '4:3', '3:4']
+                seed:
+                  type: integer
+                  description: 固定生成结果，便于复现
+                watermark:
+                  type: boolean
+                  default: true
+                  description: 默认开启，需要无水印画面必须显式传 false
+    MediaItem:
+      type: object
+      required: [type, url, role]
+      properties:
+        type:
+          type: string
+          enum: [image, video]
+        url:
+          type: string
+        role:
+          type: string
+          enum: [first_frame, reference_image, reference_video]
+    VideoTask:
+      type: object
+      properties:
+        id:
+          type: string
+        task_id:
+          type: string
+        object:
+          type: string
+          example: video
+        model:
+          type: string
+        status:
+          type: string
+          enum: [queued, in_progress, completed, failed]
+        progress:
+          type: integer
+        created_at:
+          type: integer
+        completed_at:
+          type: integer
+        metadata:
+          type: object
+          properties:
+            url:
+              type: string
+              description: 生成完成后的视频地址（注意不是顶层 url 字段）
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+            code:
+              type: string
+  responses:
+    BadRequest:
+      description: 参数错误（常见于 metadata.input.media 缺失或结构不对）
+    Unauthorized:
+      description: 令牌无效
+    InsufficientQuota:
+      description: 额度不足
+    NotFound:
+      description: 任务不存在
+    RateLimited:
+      description: 触发限流

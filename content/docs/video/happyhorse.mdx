@@ -1,0 +1,337 @@
+---
+title: HappyHorse
+description: happyhorse-*-t2v / i2v / r2v / video-edit 系列的 bytestream 接入指南
+---
+
+<Callout type="info" title="迁移说明">
+  本页由 `happyhorse.html` 迁移而来，内容结构保持一致；样式已收敛到 Fumadocs 主题，原页面的锚点导航现由
+  右侧目录（TOC）承担。**「对接必读」是本页最重要的内容，务必逐条阅读后再开始联调。**
+</Callout>
+
+本页覆盖 HappyHorse 系列 4 类视频生成模型在 bytestream 网关下的接入方式：文生视频（t2v）、图生视频
+（i2v）、参考生视频（r2v）与视频编辑（video-edit），及其请求参数、组合示例与计费边界。
+
+## 概览
+
+可用模型：
+
+| 模型 | 能力 | 说明 |
+| --- | --- | --- |
+| `happyhorse-1.1-t2v` | 文生视频 | 1.1 版本 |
+| `happyhorse-1.0-t2v` | 文生视频 | 1.0 版本 |
+| `happyhorse-1.1-i2v` | 图生视频 | 1.1 版本 |
+| `happyhorse-1.0-i2v` | 图生视频 | 1.0 版本 |
+| `happyhorse-1.1-r2v` | 参考生视频（多参考图/视频） | 1.1 版本 |
+| `happyhorse-1.0-r2v` | 参考生视频（多参考图/视频） | 1.0 版本 |
+| `happyhorse-1.0-video-edit` | 视频编辑 | 仅 1.0 版本提供 |
+
+## ⚠️ 对接必读
+
+<Callout type="warn" title="联调前必读，6 条踩坑点">
+  以下 6 点是 HappyHorse 系列与其他视频模型（如 Seedance）最大的差异所在，**忽略任一条都可能导致请求被静默
+  丢弃或结果与预期不符**。
+</Callout>
+
+1. **图片/视频输入必须放进 `metadata.input.media`，而不是顶层 `image` / `images`。** i2v / r2v /
+   video-edit 三类能力都依赖 `metadata.input.media` 数组传入参考素材；顶层 `image`/`images` 字段对
+   HappyHorse 适配器无效，传了也不会生效。
+2. **`metadata` 必须是嵌套结构 `{ input: {...}, parameters: {...} }`，不是扁平字段。** 这与 Seedance
+   系列「所有专属参数平铺在 `metadata` 下一层」的写法不同——HappyHorse 适配器要求 `metadata.input` 装载
+   输入相关内容（`media`、`prompt` 等），`metadata.parameters` 装载生成参数（`resolution`、`ratio`、
+   `seed`、`watermark` 等），两者不可混放或平铺。
+3. **t2v 不应使用顶层 `size` 字段。** 若确实要传，必须是 `"宽*高"` 格式的字符串（例如 `"1280*720"`）；
+   否则请改用 `metadata.parameters.resolution` 指定分辨率档位，这是推荐做法。
+4. **`resolution` 省略时默认是 720P，不是 1080P。** 不要假设未传时会得到更高画质，需要 1080P 必须显式
+   传入 `metadata.parameters.resolution: "1080P"`。
+5. **`watermark` 默认是开启状态，除非显式传 `false`。** 与部分模型「默认不加水印」的习惯不同，HappyHorse
+   系列默认会在输出视频上叠加水印角标，需要无水印画面必须显式关闭。
+6. **720P 与 1080P 当前计费相同。** 提高分辨率档位不会增加当前费用，但仍建议只在确有需要时使用 1080P，
+   避免不必要的处理耗时。
+
+## 鉴权
+
+请求头携带 `Authorization: Bearer sk-xxxxxxxx`。令牌需在「控制台 → 令牌管理」中绑定可访问对应
+`happyhorse-*` 模型的分组。
+
+## 调用端点
+
+| 端点 | 请求体 | 提交响应 |
+| --- | --- | --- |
+| `POST /v1/videos` | JSON | `{ id, task_id, object, status, model, created_at, ... }` |
+
+## 01 · 请求参数详解
+
+### 顶层参数
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `model` | string | 必填 | 见上方模型清单，7 选 1。 |
+| `prompt` | string | 视 t2v 必填 | 视频内容文本描述；t2v 场景下建议放在顶层，i2v/r2v/video-edit 场景也可放在 `metadata.input.prompt` 中，两处等效。 |
+| `size` | string | 不建议使用 | **t2v 场景**若要传必须是 `"宽*高"` 格式（如 `"1280*720"`）；**不建议使用**，推荐改用 `metadata.parameters.resolution`。 |
+| `metadata` | object | **必填** | 见下方「metadata 嵌套结构」——HappyHorse 的核心参数容器，`parameters` 始终必填；`input` 仅在 i2v/r2v/video-edit 场景下必填（此时 `input.media` 同样必填），t2v 场景可完全省略 `input`。 |
+
+<Callout type="warn">
+  与 Seedance 不同，HappyHorse 适配器**不接受**顶层 `image`/`images`/`duration`/`seconds` 字段——这些能力全部
+  通过 `metadata.input` / `metadata.parameters` 表达，传在顶层会被忽略。
+</Callout>
+
+### metadata 嵌套结构
+
+```json
+{
+  "metadata": {
+    "input": {
+      "prompt": "string，可选（未在顶层传 prompt 时使用）",
+      "media": [
+        { "type": "image", "url": "string", "role": "first_frame | reference_image" },
+        { "type": "video", "url": "string", "role": "reference_video" }
+      ]
+    },
+    "parameters": {
+      "resolution": "720P（默认）| 1080P",
+      "ratio": "16:9 | 9:16 | 1:1 | 4:3 | 3:4",
+      "seed": "integer，可选，固定生成结果",
+      "watermark": "boolean，默认 true"
+    }
+  }
+}
+```
+
+#### `metadata.input`
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `prompt` | string | 可选 | 文本描述，与顶层 `prompt` 二选一，同时传入以顶层为准。 |
+| `media` | array\<object\> | i2v/r2v/video-edit 必填 | 参考素材数组，每项 `{ type: "image"\|"video", url, role }`。i2v 通常传 1 项 `first_frame`；r2v 可传多项 `reference_image`/`reference_video` 组合；video-edit 必须传待编辑的源视频。 |
+
+#### `metadata.parameters`
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `resolution` | string | 可选 | `720P`（**省略时默认值**）或 `1080P`。二者当前计费相同（见「计费档位」）。 |
+| `ratio` | string | 可选 | 画面比例：`16:9` / `9:16` / `1:1` / `4:3` / `3:4`。 |
+| `seed` | integer | 可选 | 随机种子，固定生成结果，便于复现。 |
+| `watermark` | boolean | 可选 | **默认 `true`**（会加水印）；需要无水印画面必须显式传 `false`。 |
+
+## 02 · 请求组合示例
+
+### 01 · 文生视频（t2v）
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/videos \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "happyhorse-1.1-t2v",
+    "prompt": "草原上一群骏马奔腾扬起尘土，逆光镜头",
+    "metadata": {
+      "parameters": { "resolution": "720P", "ratio": "16:9" }
+    }
+  }'
+```
+
+### 02 · 图生视频 · 首帧（i2v）
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/videos \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "happyhorse-1.1-i2v",
+    "metadata": {
+      "input": {
+        "prompt": "画面中的马缓缓抬起头，甩动鬃毛",
+        "media": [
+          { "type": "image", "url": "https://cdn.example.com/horse-still.jpg", "role": "first_frame" }
+        ]
+      },
+      "parameters": { "resolution": "720P" }
+    }
+  }'
+```
+
+<Callout type="warn">
+  i2v 场景切勿使用顶层 `image` 字段——必须放进 `metadata.input.media`，否则参考图不会生效，模型会退化为
+  纯文生视频。
+</Callout>
+
+### 03 · 参考生视频 · 多参考图（r2v）
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/videos \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "happyhorse-1.1-r2v",
+    "metadata": {
+      "input": {
+        "prompt": "融合两张参考图的风格与构图，生成过渡动画",
+        "media": [
+          { "type": "image", "url": "https://cdn.example.com/ref-a.jpg", "role": "reference_image" },
+          { "type": "image", "url": "https://cdn.example.com/ref-b.jpg", "role": "reference_image" }
+        ]
+      },
+      "parameters": { "resolution": "720P", "ratio": "9:16" }
+    }
+  }'
+```
+
+### 04 · 视频编辑（video-edit）
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/videos \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "happyhorse-1.0-video-edit",
+    "metadata": {
+      "input": {
+        "prompt": "将背景替换为雪山场景，保留主体动作不变",
+        "media": [
+          { "type": "video", "url": "https://cdn.example.com/source-clip.mp4", "role": "reference_video" }
+        ]
+      },
+      "parameters": { "resolution": "720P" }
+    }
+  }'
+```
+
+<Callout type="warn">
+  `video-edit` 仅 `happyhorse-1.0-video-edit` 一个模型提供（无 1.1 版本），且 `metadata.input.media` 中的源视频为
+  **必填**，缺失会直接被上游拒绝。
+</Callout>
+
+### 05 · 1080P + 自定义画面比例
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/videos \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "happyhorse-1.1-t2v",
+    "prompt": "城市夜景霓虹灯光下的车流延时摄影",
+    "metadata": {
+      "parameters": { "resolution": "1080P", "ratio": "21:9" }
+    }
+  }'
+```
+
+<Callout type="info">
+  `ratio` 官方枚举值为 `16:9` / `9:16` / `1:1` / `4:3` / `3:4`，此处 `21:9` 仅作示例说明自定义比例的写法，
+  实际是否支持以联调结果为准；720P/1080P 当前计费相同，见「计费档位」。
+</Callout>
+
+### 06 · 固定随机种子 + 关闭水印
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/videos \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "happyhorse-1.1-t2v",
+    "prompt": "同一场景不同光照条件下的可复现渲染测试",
+    "metadata": {
+      "parameters": { "resolution": "720P", "seed": 42, "watermark": false }
+    }
+  }'
+```
+
+<Callout type="warn">
+  `watermark` **默认是 `true`**——不显式传 `false` 的话，输出视频会带水印。这是本系列最容易被忽略的一条。
+</Callout>
+
+## 03 · 任务状态查询
+
+### `GET /v1/videos/{task_id}`
+
+与 Seedance 系列共用同一套查询格式与状态机：`queued → in_progress → completed / failed`。
+
+```json
+{
+  "id": "task_7a1b2c3d4e5f60718293a4b5c6d7e8f9",
+  "task_id": "task_7a1b2c3d4e5f60718293a4b5c6d7e8f9",
+  "object": "video",
+  "model": "happyhorse-1.1-t2v",
+  "status": "completed",
+  "progress": 100,
+  "created_at": 1721900000,
+  "completed_at": 1721900098,
+  "metadata": { "url": "https://cdn.bytestream.com.cn/videos/7a1b2c3d.mp4" }
+}
+```
+
+<Callout type="warn">
+  视频地址位于 `metadata.url`，不是顶层 `url` 字段——与 Seedance 系列一致。
+</Callout>
+
+## 04 · 附录
+
+### 计费档位
+
+| 分辨率 | 相对计费倍率 |
+| --- | --- |
+| 720P（默认） | 1.0x |
+| 1080P | 1.0x（**当前与 720P 计费相同**） |
+
+<Callout type="info">
+  720P 与 1080P 当前计费相同，是「对接必读」第 6 条列出的当前状态，未来可能调整，请以「控制台 → 渠道 →
+  模型倍率」中的实时配置为准。
+</Callout>
+
+### 错误码
+
+| 状态码 | 说明 |
+| --- | --- |
+| `200` | 提交/查询成功 |
+| `400` | 参数错误 · `invalid_request`（常见于 `metadata.input.media` 缺失或结构不对） |
+| `401` | 令牌无效 · `invalid_api_key` |
+| `402` | 额度不足 · `insufficient_user_quota` |
+| `404` | 任务不存在 |
+| `429` | 触发限流 · `rate_limit_exceeded` |
+| `500` | 上游/网关内部错误 |
+
+### 速查
+
+<Tabs items={['完整参数请求体', '对接必读清单', '鉴权头']}>
+  <Tab value="完整参数请求体">
+    ```json
+    {
+      "model": "happyhorse-1.1-r2v",
+      "metadata": {
+        "input": {
+          "prompt": "...",
+          "media": [
+            { "type": "image", "url": "...", "role": "reference_image" },
+            { "type": "video", "url": "...", "role": "reference_video" }
+          ]
+        },
+        "parameters": {
+          "resolution": "720P",
+          "ratio": "16:9",
+          "seed": 42,
+          "watermark": false
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab value="对接必读清单">
+    ```text
+    1. media 放 metadata.input.media，不放顶层 image/images
+    2. metadata 必须是 { input, parameters } 嵌套结构
+    3. t2v 不用顶层 size（要用需 "宽*高" 格式）
+    4. resolution 省略 = 720P（不是 1080P）
+    5. watermark 默认 true，需显式传 false 才关闭
+    6. 720P / 1080P 当前计费相同
+    ```
+  </Tab>
+  <Tab value="鉴权头">
+    ```text
+    Authorization: Bearer sk-xxxxxxxxxxxx
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+bytestream · HappyHorse 系列接入文档 —— 本文档为接入示例（非官方最终版），供接口联调参考。

@@ -1,0 +1,31 @@
+{
+  "name": "bytestream-docs",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "postinstall": "fumadocs-mdx",
+    "gen:openapi": "node scripts/generate-openapi.mjs"
+  },
+  "dependencies": {
+    "fumadocs-core": "^16.12.1",
+    "fumadocs-ui": "^16.12.1",
+    "fumadocs-mdx": "^15.2.0",
+    "fumadocs-openapi": "^11.2.2",
+    "next": "^16.2.11",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/mdx": "^2.0.13",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "postcss": "^8.5.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,30 @@
+---
+title: 概览
+description: bytestream 对接文档站导航说明
+---
+
+## bytestream 是什么
+
+bytestream 是基于开源 [new-api](https://github.com/QuantumNous/new-api) 搭建的 AI 中转站，统一网关地址为
+`https://aiapi.bytestream.com.cn/`。本站是面向对接方的 API 使用说明文档。
+
+## 如何使用本文档
+
+按你要接入的能力选择入口：
+
+- **[文本生成](/docs/text)** —— OpenAI 兼容的 `POST /v1/chat/completions`，覆盖 OpenAI / Claude / 智谱 / 千问 /
+  MiniMax / Kimi / Deepseek 七个供应商系列。
+- **[视频生成](/docs/video)** —— 异步任务型 API（提交任务 + 轮询查询），当前覆盖 Doubao Seedance 2.0 与
+  HappyHorse 两个系列。
+
+每个系列页面均沿用「概览 → 对接必读 → 鉴权 → 参数详解 → 请求组合示例 → 任务查询/响应 → 计费 → 错误码」的统一结构，
+方便跨供应商查阅时保持一致的阅读路径。
+
+<Cards>
+  <Card title="文本生成对接指南" href="/docs/text">
+    Chat Completions 兼容接口，7 个供应商系列
+  </Card>
+  <Card title="视频生成对接指南" href="/docs/video">
+    异步任务型接口，Seedance / HappyHorse
+  </Card>
+</Cards>

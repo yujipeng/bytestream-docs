@@ -1,0 +1,79 @@
+---
+title: 通用说明
+description: 文本生成能力的统一鉴权、端点与响应结构说明，供全部供应商系列共用
+---
+
+<Callout type="info" title="页面定位">
+  本页说明对全部文本供应商系列都成立的通用约定；每个供应商系列页面只描述与本页的差异点（专属参数、思考模式、
+  特有字段等），避免 7 份文档重复维护同一套鉴权/端点/错误码说明。
+</Callout>
+
+## 统一端点
+
+bytestream 的全部文本模型均通过同一个 OpenAI 兼容端点调用：
+
+```
+POST https://aiapi.bytestream.com.cn/v1/chat/completions
+```
+
+请求体、响应体结构与 [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat) 保持一致，
+仅 `model` 字段取值决定实际路由到的供应商与模型档位（见各供应商系列页面的模型清单）。
+
+## 统一鉴权
+
+请求头携带：
+
+```
+Authorization: Bearer sk-xxxxxxxxxxxx
+```
+
+`sk-` 前缀可省略。令牌需要在「控制台 → 令牌管理」中绑定可访问目标模型的分组，否则会返回鉴权 / 额度类错误。
+
+## 流式 / 非流式响应
+
+- 非流式：`stream` 省略或为 `false` 时，返回完整 `chat.completion` 对象。
+- 流式：`stream: true` 时，返回 `text/event-stream`，逐块推送 `chat.completion.chunk`，以 `data: [DONE]` 结束。
+
+<Tabs items={['非流式请求', '流式请求']}>
+  <Tab value="非流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "<按供应商系列页面选择>",
+        "messages": [{ "role": "user", "content": "你好" }]
+      }'
+    ```
+  </Tab>
+  <Tab value="流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "<按供应商系列页面选择>",
+        "messages": [{ "role": "user", "content": "你好" }],
+        "stream": true
+      }'
+    ```
+  </Tab>
+</Tabs>
+
+## 通用错误码
+
+| 状态码 | 说明 |
+| --- | --- |
+| `200` | 请求成功 |
+| `400` | 参数错误 · `invalid_request` |
+| `401` | 令牌无效 · `invalid_api_key` |
+| `402` | 额度不足 · `insufficient_user_quota` |
+| `429` | 触发限流 · `rate_limit_exceeded` |
+| `500` | 上游 / 网关内部错误 |
+
+错误体统一为 `{"error": {"message", "type", "param", "code"}}`；各供应商系列如有特有错误码，会在该系列页面单独补充。
+
+<Callout type="warn" title="内容撰写中">
+  本页与下方 7 个供应商系列页面当前为**框架骨架 + OpenAPI 参考页壳**，具体的模型专属参数、对接必读差异点、
+  请求/响应示例等内容由后续里程碑（文本模型对接文档编写）填充。
+</Callout>

@@ -1,0 +1,419 @@
+---
+title: Doubao Seedance 2.0
+description: doubao-seedance-2-0 / -fast / -mini 三档视频生成模型的 bytestream 接入指南
+---
+
+<Callout type="info" title="迁移说明">
+  本页由 `seedance-2.0.html` 迁移而来，内容结构保持一致；样式已收敛到 Fumadocs 主题，原页面的锚点导航现由
+  右侧目录（TOC）承担。
+</Callout>
+
+本页覆盖 **doubao-seedance-2.0 / doubao-seedance-2.0-fast / doubao-seedance-2.0-mini** 三档视频生成模型在
+bytestream 网关（`https://aiapi.bytestream.com.cn/`）下的完整接入方式：全部请求参数、多模态参考内容
+（首尾帧、参考视频/音频）的传参技巧，以及对照火山引擎官方文档核对过的分辨率 / 时长 / 计费边界，附 6 组
+端到端请求组合示例。
+
+| 调用端点 | 可选模型档位 | 请求组合示例 |
+| --- | --- | --- |
+| 1 | 3 | 6 |
+
+## 概览
+
+bytestream 通过 `doubao-video` 渠道对接火山引擎豆包 Seedance 2.0 系列模型，将客户端请求转换为上游
+`POST /api/v3/contents/generations/tasks` 调用。可用模型：
+
+- **doubao-seedance-2-0** · 标准版
+- **doubao-seedance-2-0-fast** · 快速版
+- **doubao-seedance-2-0-mini** · 迷你版
+
+<Callout type="info">
+  **标准版（doubao-seedance-2-0）：** 面向追求最高画质与最完整能力集的场景——支持全部分辨率档位 `480p` /
+  `720p` / `1080p` / `4k`，是三档中唯一支持参考视频（`reference_video`）与联网搜索工具的档位；限速遵循账号在该
+  模型下的默认 RPM / TPM 配额（无统一公开数值，可在「控制台 → 开通管理 → 模型推理接入点」中查看当前额度并
+  按需申请提升）。
+</Callout>
+
+<Callout type="info">
+  **Fast 版（doubao-seedance-2-0-fast）：** 面向低延迟、快速出片的场景——响应更快、单价更低，适合对生成速度
+  敏感、可接受略低画质上限的批量出图与快速迭代预览；仅支持 `480p` / `720p`（不支持 1080p / 4k）；限速同样遵循
+  账号默认 RPM / TPM 配额，无独立于标准版的固定数值，可在控制台按需查看与调整。
+</Callout>
+
+<Callout type="info">
+  **迷你版（Mini，doubao-seedance-2-0-mini）：** 面向大批量、成本敏感的视频生产场景，生成成本约为标准版的
+  一半；仅支持 `480p` / `720p`（不支持 1080p / 4k），账号默认限速为 RPM 60、并发 1。该模型上线时间较新，完整
+  版本号后缀请以「控制台 → 模型管理」页面展示的模型 ID 为准；若尚未出现在渠道模型列表中，可由管理员在
+  「渠道 → 自定义模型」中手动添加映射后使用。
+</Callout>
+
+## 鉴权
+
+请求头携带 `Authorization: Bearer sk-xxxxxxxx`（`sk-` 前缀可省略）。令牌需在「控制台 → 令牌管理」中绑定可访问
+`doubao-seedance-2-0` / `doubao-seedance-2-0-fast` / `doubao-seedance-2-0-mini` 模型的分组。
+
+## 调用端点
+
+bytestream 暴露单一提交路由，请求体为 JSON（非 multipart），统一走 `doubao` 适配器。
+
+| 端点 | 请求体 | 提交响应 | 适用场景 |
+| --- | --- | --- | --- |
+| `POST /v1/videos` | JSON | `{ id, task_id, object, status, model, created_at, ... }` | OpenAI Video API 兼容调用方（`POST /v1/videos` 语义对齐 [platform.openai.com/videos](https://platform.openai.com/docs/api-reference/videos/create)） |
+
+<Callout type="info">
+  该路由与 `POST /v1/video/generations` 复用同一套 `doubao` 适配器与请求体结构（同一个 `TaskSubmitReq`，同一段
+  `ValidateBasicTaskRequest` 校验逻辑），二者请求参数、`metadata` 扩展字段完全一致，仅 URL 路径与查询响应的
+  返回格式不同（见下方「调用端点」响应列与「任务查询」一节）。
+</Callout>
+
+## 01 · 请求参数详解
+
+### 顶层参数
+
+JSON 请求体最外层字段。
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `model` | string | 必填 | `doubao-seedance-2-0`（标准版）、`doubao-seedance-2-0-fast`（快速版）或 `doubao-seedance-2-0-mini`（迷你版，成本优先）。 |
+| `prompt` | string | 必填 | 视频内容文本描述。作为一个 `type: text` 的内容项自动追加到上游 `content` 数组末尾。 |
+| `image` | string | 可选 | 图生视频的单张参考图（URL）。等价于 `images` 数组只含一项。 |
+| `images` | array\<string\> | 可选 | 多张参考图 URL；每项会被转换为 `{ type: "image_url", image_url: { url } }` 内容项，**不带 role**（默认按首帧处理）。若需要区分首帧/尾帧/参考图，改用 `metadata.content`（见下节）。 |
+| `duration` | integer | 可选 | 期望时长（秒）。也可通过 `seconds`（字符串）传入，二者任填其一，最终都会写入上游 `duration`。上限受 `MaxTaskDurationSeconds=3600` 硬约束，但 Seedance 实际支持范围以官方文档为准（4～15 秒）。 |
+| `seconds` | string | 可选 | 同 `duration`，字符串形式，OpenAI 兼容风格调用方常用此字段。 |
+| `metadata` | object | 按需 | Seedance 专属参数容器——分辨率、画面比例、随机种子、音频生成、首尾帧标记、优先级、回调地址等**全部**放在这里，见下节完整清单。 |
+
+<Callout type="warn" title="为什么参数要放进 metadata？">
+  bytestream 的任务请求结构体（`TaskSubmitReq`）只固定声明了
+  `prompt / model / mode / image / images / size / duration / seconds / input_reference` 这几个通用字段；除此之外
+  的任何 JSON key 都会被路由收集进 `metadata` map。`doubao` 适配器随后把整个 `metadata` 做一次 JSON
+  反序列化，直接映射到上游请求结构体的同名字段上——因此 `resolution`、`ratio`、`seed` 等 Seedance 专属参数，
+  必须嵌套写在 `metadata` 对象内部，而不能写在请求体顶层，否则会被静默丢弃。
+</Callout>
+
+### metadata 扩展参数（Seedance 专属）
+
+以下字段全部嵌套在 `metadata` 对象内。已对照火山引擎官方文档核对每个字段在 2.0 / 2.0-fast / 2.0-mini 三档下的
+实际支持范围。
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `resolution` | string | 可选 | 输出分辨率档位：`480p` / `720p`（默认）/ `1080p` / `4k`。**1080p 与 4k 仅标准版 doubao-seedance-2-0 支持**，快速版与迷你版均只能使用 `480p` / `720p`，传入更高档位会被上游拒绝。 |
+| `ratio` | string | 可选 | 画面比例，等价于官方 `size` 维度，官方文档明确的 7 个枚举值：`16:9` / `9:16` / `1:1` / `4:3` / `3:4` / `21:9` / `adaptive`；传入范围外的值会返回 `InvalidParameter`。 |
+| `duration` | integer | 可选 | 与顶层 `duration`/`seconds` 等效的另一种写法（会被顶层字段覆盖，二选一即可，不要同时传递不同的值）。经与官方文档核对，Seedance 2.0 全系列（含 fast/mini）时长范围均为 **4～15 秒**。 |
+| `seed` | integer | 可选 | 随机种子，用于固定生成结果。**官方文档明确标注 Seedance 2.0 系列（含 fast/mini）暂不支持该参数**，传入会被上游忽略，不影响生成结果的可复现性。 |
+| `generate_audio` | boolean | 可选 | 是否为视频生成配套音频，默认为 `true`。 |
+| `return_last_frame` | boolean | 可选 | 是否额外返回视频尾帧静态图 URL，默认 `false`。 |
+| `camera_fixed` | boolean | 可选 | 是否固定镜头位（禁用运镜）。**官方文档明确标注 Seedance 2.0 系列（含 fast/mini）暂不支持该参数**（含参考图场景），传入会被忽略。 |
+| `watermark` | boolean | 可选 | 是否在输出视频上添加水印，默认 `false`；关闭后不再叠加"AI生成"角标。 |
+| `service_tier` | string | 可选 | 推理服务等级，默认 `default`（在线）。官方文档标注 Seedance 2.0 系列（含 fast/mini）暂不支持 `flex` 离线档位，无需传入该字段。 |
+| `priority` | integer | 可选 | 任务优先级，取值范围 `0~9`，默认 `0`，数值越大排队越靠前。 |
+| `execution_expires_after` | integer | 可选 | 任务执行的过期时间（秒），默认 `172800`，取值范围 `3600~259200`，超时未完成则标记失败。 |
+| `safety_identifier` | string | 可选 | 内容安全标识，用于按用户维度做审核追踪。 |
+| `tools` | array\<object\> | 可选 | 工具列表，每项 `{ "type": "web_search" }`，开启后模型生成前可联网检索参考信息（Seedance 2.0 全系列均支持）。 |
+| `callback_url` | string | 可选 | 任务状态变更的回调地址；不设置则只能通过轮询获取结果。 |
+| `content` | array\<object\> | 可选 | 底层多模态内容数组的**直通写法**，用于精确表达首尾帧、参考图角色、参考视频/音频等能力，见下节详细说明。 |
+
+<Callout type="warn" title="已从本页移除的字段">
+  `frames`（直接指定帧数）与 `draft`（草稿模式）在官方文档中均标注为 Seedance 2.0 系列（含 fast/mini）
+  **暂不支持**，因此不再作为可用参数列出；请统一使用 `duration`/`seconds` 控制时长。
+</Callout>
+
+#### 分辨率 × 画面比例 → 像素尺寸对照（部分，Seedance 2.0 标准版）
+
+| 分辨率 | 16:9 | 1:1 | 支持模型 |
+| --- | --- | --- | --- |
+| 480p | 864×496 | 640×640 | 标准版 / 快速版 / 迷你版 |
+| 720p（默认） | 1280×720 | 960×960 | 标准版 / 快速版 / 迷你版 |
+| 1080p | 1920×1080 | 1440×1440 | 仅标准版 |
+| 4k | 3840×2160 | 2880×2880 | 仅标准版 |
+
+分辨率档位定义的是像素面积而非短边长度；4:3 / 3:4 / 9:16 / 21:9 等其余比例的具体像素尺寸请以官方文档实时
+数据为准。
+
+### 多模态参考内容 · metadata.content 直通
+
+bytestream 的顶层 `images` 字段只能表达"若干张参考图、不区分角色"。当需要精确指定**首帧 / 尾帧 / 参考图**，
+或者传入**参考视频 / 参考音频**时，应改用 `metadata.content`：直接书写上游豆包接口的原生内容数组，每一项
+结构为：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `type` | string | `"text"` / `"image_url"` / `"video_url"` / `"audio_url"` |
+| `text` | string | 当 `type="text"` 时的文本内容（一般无需手写，`prompt` 字段会自动追加一条文本项）。 |
+| `image_url.url` | string | 图片地址，当 `type="image_url"` 时使用；可以是公网 URL、base64 字符串，或素材审核后返回的 `asset://` ID。 |
+| `video_url.url` | string | 视频地址，当 `type="video_url"` 时使用（参考视频，1.8s~15.2s，分辨率 480P~720P，不可含真人）。 |
+| `audio_url.url` | string | 音频地址，当 `type="audio_url"` 时使用（参考音频，总时长 ≤15s，需配合参考图片/视频）。 |
+| `role` | string | 可选角色标记。`image_url` 项支持 `first_frame` / `last_frame` / `reference_image`；`video_url` 项对应 `reference_video`（仅标准版 2.0 支持）；`audio_url` 项对应 `reference_audio`。 |
+
+<Callout type="warn" title="覆盖规则">
+  若同时传入顶层 `images` 与 `metadata.content`，`metadata.content` 会整体覆盖由 `images` 生成的内容项
+  （适配器先按 `images` 拼装，再用 `metadata` 反序列化覆盖同名字段）。需要角色化参考内容时，**只使用
+  `metadata.content`，不要再传顶层 `images`**，避免歧义。
+</Callout>
+
+## 02 · 请求组合示例
+
+### 01 · 纯文生视频（Text-to-Video）
+
+不传任何图片/视频/音频参考，仅凭文本描述生成，720p 默认档位。
+
+<Tabs items={['cURL', 'Python']}>
+  <Tab value="cURL">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/videos \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "doubao-seedance-2-0",
+        "prompt": "海面上一艘帆船在夕阳中缓缓驶向远方，海鸥掠过水面",
+        "duration": 5,
+        "metadata": { "ratio": "16:9", "resolution": "720p" }
+      }'
+    ```
+  </Tab>
+  <Tab value="Python">
+    ```python
+    import requests
+
+    resp = requests.post(
+        "https://aiapi.bytestream.com.cn/v1/videos",
+        headers={"Authorization": "Bearer sk-your-token"},
+        json={
+            "model": "doubao-seedance-2-0",
+            "prompt": "海面上一艘帆船在夕阳中缓缓驶向远方，海鸥掠过水面",
+            "duration": 5,
+            "metadata": {"ratio": "16:9", "resolution": "720p"},
+        },
+    )
+    ```
+  </Tab>
+</Tabs>
+
+### 02 · 图生视频 · 单图（Image-to-Video）
+
+传入一张首帧参考图，让模型在此基础上生成动态视频。
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/videos \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "doubao-seedance-2-0",
+    "prompt": "画面中的猫缓慢睁开眼睛，转头看向镜头",
+    "image": "https://cdn.example.com/cat-still.jpg",
+    "duration": 4,
+    "metadata": { "ratio": "1:1" }
+  }'
+```
+
+### 03 · 首尾帧生成（First / Last Frame）
+
+同时指定起始帧与结束帧，模型生成中间过渡动画，通过 `metadata.content` 的 `role` 字段表达角色。
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/videos \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "doubao-seedance-2-0",
+    "prompt": "花朵从含苞待放到完全绽放的延时过渡",
+    "duration": 6,
+    "metadata": {
+      "ratio": "9:16",
+      "content": [
+        { "type": "image_url", "image_url": { "url": "https://cdn.example.com/bud.jpg" }, "role": "first_frame" },
+        { "type": "image_url", "image_url": { "url": "https://cdn.example.com/bloom.jpg" }, "role": "last_frame" }
+      ]
+    }
+  }'
+```
+
+<Callout type="warn">
+  使用 `metadata.content` 时不要再传顶层 `image`/`images`，二者会冲突（后者会被覆盖），保持单一数据源。
+</Callout>
+
+### 04 · 参考视频 + 参考音频
+
+提供一段参考视频约束运动风格，并叠加参考音频驱动口型/节奏（`role` 分别为 `reference_video` /
+`reference_audio`，仅标准版 2.0 支持参考视频）。
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/videos \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "doubao-seedance-2-0",
+    "prompt": "参照给定的运镜与节奏生成一段舞蹈片段",
+    "duration": 8,
+    "metadata": {
+      "ratio": "9:16",
+      "resolution": "1080p",
+      "content": [
+        { "type": "video_url", "video_url": { "url": "https://cdn.example.com/ref-motion.mp4" }, "role": "reference_video" },
+        { "type": "audio_url", "audio_url": { "url": "https://cdn.example.com/ref-beat.mp3" }, "role": "reference_audio" }
+      ]
+    }
+  }'
+```
+
+<Callout type="info">
+  参考视频要求时长 1.8s~15.2s、分辨率 480P~720P 且不可含真人；参考音频总时长需 ≤15s，且通常需配合参考图片
+  或视频一起使用（以上为上游豆包官方限制，新增内容会由上游校验，bytestream 不做二次校验）。启用 1080p
+  档位时该请求会按「视频输入」计费倍率结算，见「计费档位」一节。
+</Callout>
+
+### 05 · 4K 高清（仅标准版）
+
+标准版支持的最高画质档位，费用相应更高。
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/videos \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "doubao-seedance-2-0",
+    "prompt": "城市天际线延时摄影，云层快速流动",
+    "duration": 6,
+    "metadata": { "ratio": "21:9", "resolution": "4k", "watermark": false }
+  }'
+```
+
+### 06 · 异步回调 + 执行有效期 + 优先级
+
+提交后不轮询，改由回调地址接收状态变更；同时设置任务执行超时与高优先级。
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/videos \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "doubao-seedance-2-0",
+    "prompt": "工厂流水线机械臂高速装配零件的特写镜头",
+    "duration": 8,
+    "metadata": {
+      "ratio": "16:9",
+      "resolution": "1080p",
+      "callback_url": "https://your-backend.com/webhooks/video-task",
+      "execution_expires_after": 1800,
+      "priority": 8,
+      "return_last_frame": true
+    }
+  }'
+```
+
+<Callout type="warn">
+  即使设置了 `callback_url`，仍建议保留一次兜底轮询：回调可能因网络问题丢失，轮询接口始终可作为状态的
+  最终真源。
+</Callout>
+
+## 03 · 任务状态查询
+
+### `GET /v1/videos/{task_id}`
+
+OpenAI Video API 兼容格式查询，状态机：`queued → in_progress → completed / failed`。`{task_id}` 即提交响应中
+的 `id`（等同 `task_id` 字段，后者为兼容旧接口保留，未来可能废弃）。
+
+```json
+{
+  "id": "task_9f3a2b7c1e4d5f608a1b2c3d4e5f6071",
+  "task_id": "task_9f3a2b7c1e4d5f608a1b2c3d4e5f6071",
+  "object": "video",
+  "model": "doubao-seedance-2-0",
+  "status": "completed",
+  "progress": 100,
+  "created_at": 1721900000,
+  "completed_at": 1721900123,
+  "metadata": { "url": "https://cdn.bytestream.com.cn/videos/9f3a2b7c.mp4" }
+}
+```
+
+<Callout type="warn">
+  视频地址不再是顶层 `url` 字段，而是位于 `metadata.url` 中；`status` 取值也从原生任务态
+  （`queued/in_progress/success/failure`）映射为 OpenAI 风格的 `queued / in_progress / completed / failed`。
+  生成失败时错误信息位于 `error.message` / `error.code`。
+</Callout>
+
+## 04 · 附录
+
+### 计费档位
+
+计费倍率按「输出分辨率档位 × 是否含视频输入参考」组合计算，相对基准档（480p/720p，不含视频输入）的单价换算
+为计费倍率。单位：元 / 百万 token（渠道内部计费口径）。
+
+| 模型 | 480p/720p 基准 | 1080p | 4k | 含视频输入（基准档） | 含视频输入（1080p） | 含视频输入（4k） |
+| --- | --- | --- | --- | --- | --- | --- |
+| doubao-seedance-2-0 | 46.0 | 51.0 | 26.0 | 28.0 | 31.0 | 16.0 |
+| doubao-seedance-2-0-fast | 37.0 | 不支持 | 不支持 | 22.0 | — | — |
+| doubao-seedance-2-0-mini | 23.0 | 不支持 | 不支持 | 14.0 | — | — |
+
+快速版与迷你版均不提供 1080p / 4k 档位；迷你版基准价按火山引擎官方定价（不含视频输入 0.023 元/千 token、含
+视频输入 0.014 元/千 token）换算为百万 token 单位得出。实际以「控制台 → 渠道 → 模型倍率」中管理员配置的
+基准价为准，此处比例关系恒定。
+
+### 错误码
+
+| 状态码 | 说明 |
+| --- | --- |
+| `200` | 提交/查询成功 |
+| `400` | 参数错误 · `invalid_request` / `invalid_seconds` |
+| `401` | 令牌无效 · `invalid_api_key` |
+| `402` | 额度不足 · `insufficient_user_quota` |
+| `404` | 任务不存在 |
+| `429` | 触发限流 · `rate_limit_exceeded` |
+| `500` | 上游/网关内部错误 |
+
+错误体统一为 `{"error": {"message", "type", "param", "code"}}`；任务查询失败时（`status: "failed"`）错误信息在
+响应体的 `error.message` / `error.code` 中给出。
+
+### 速查
+
+<Tabs items={['完整参数请求体', '字段速查', '鉴权头']}>
+  <Tab value="完整参数请求体">
+    ```json
+    {
+      "model": "doubao-seedance-2-0",
+      "prompt": "...",
+      "duration": 6,
+      "metadata": {
+        "ratio": "16:9",
+        "resolution": "1080p",
+        "generate_audio": true,
+        "return_last_frame": false,
+        "watermark": false,
+        "priority": 5,
+        "execution_expires_after": 172800,
+        "callback_url": "https://...",
+        "tools": [{ "type": "web_search" }],
+        "content": [
+          { "type": "image_url", "image_url": { "url": "..." }, "role": "first_frame" },
+          { "type": "video_url", "video_url": { "url": "..." }, "role": "reference_video" }
+        ]
+      }
+    }
+    ```
+  </Tab>
+  <Tab value="字段速查">
+    ```text
+    resolution  480p/720p/1080p/4k
+    ratio       16:9 9:16 1:1 4:3 3:4 21:9 adaptive
+    duration    4~15 秒（2.0/fast/mini 一致）
+    1080p/4k    仅标准版
+    camera_fixed/seed
+      2.0 全系列暂不支持
+    content[].role
+      first_frame / last_frame
+      / reference_image
+      / reference_video
+      / reference_audio
+    ```
+  </Tab>
+  <Tab value="鉴权头">
+    ```text
+    Authorization: Bearer sk-xxxxxxxxxxxx
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+bytestream · doubao-video 渠道 · Doubao Seedance 2.0 接入文档 —— 本文档为接入示例（非官方最终版），供接口
+联调参考。

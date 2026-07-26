@@ -1,0 +1,27 @@
+---
+title: 概览
+description: 视频生成能力总览 —— 异步任务型 API 的通用约定
+---
+
+bytestream 的视频生成能力均为**异步任务型**接口：提交任务后拿到 `task_id`，再通过轮询（或回调）获取结果，
+与文本生成的同步/流式调用方式不同。
+
+## 通用端点
+
+| 端点 | 说明 |
+| --- | --- |
+| `POST /v1/videos` | 提交视频生成任务，JSON 请求体 |
+| `GET /v1/videos/{task_id}` | 查询任务状态，OpenAI Video API 兼容格式 |
+
+状态机统一为：`queued → in_progress → completed / failed`。
+
+## 已覆盖系列
+
+<Cards>
+  <Card title="Doubao Seedance 2.0" href="/docs/video/seedance">
+    doubao-seedance-2-0 / -fast / -mini 三档
+  </Card>
+  <Card title="HappyHorse" href="/docs/video/happyhorse">
+    happyhorse-*-t2v / i2v / r2v / video-edit
+  </Card>
+</Cards>
