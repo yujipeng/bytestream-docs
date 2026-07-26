@@ -7,30 +7,12 @@ services:
     restart: unless-stopped
     environment:
       - NODE_ENV=production
-    expose:
-      - "3000"
-    # 不直接对外映射端口；只允许同一 compose 网络内的 nginx 反代访问。
-
-  nginx:
-    image: nginx:1.27-alpine
-    restart: unless-stopped
-    depends_on:
-      - app
+    # 方案 A：宿主机已有一套 nginx（宝塔，路径 /www/server/nginx，占用 80/443），
+    # 不再起容器 nginx。只把 app 绑到本地回环由宿主机 nginx 反代；不对公网暴露端口。
+    # 宿主机 3000 已被 multica-frontend 占用，这里改用 3200 避免冲突。
     ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./deploy/nginx/app.conf:/etc/nginx/conf.d/default.conf:ro
-      # Let's Encrypt 证书与 HTTP-01 校验目录；首次启动会自动创建这两个宿主机目录。
-      - ./deploy/certbot/conf:/etc/letsencrypt
-      - ./deploy/certbot/www:/var/www/certbot
+      - "127.0.0.1:3200:3000"
 
-  certbot:
-    image: certbot/certbot:latest
-    volumes:
-      - ./deploy/certbot/conf:/etc/letsencrypt
-      - ./deploy/certbot/www:/var/www/certbot
-    # 默认不随 `docker compose up` 启动，仅在签发/续期证书时手动运行，见 DEPLOY.md。
-    profiles: ["certbot"]
-    entrypoint: >-
-      sh -c "trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done"
+# 说明：容器 nginx / certbot 已移除，交给宿主机宝塔面板做反向代理 + Let's Encrypt。
+# 在宝塔「网站」里为 apidoc.uwid.top 建站，反向代理目标填 http://127.0.0.1:3200，
+# 证书用宝塔一键 SSL 申请。deploy/nginx/app.conf 仅作为反代配置的参考模板保留。

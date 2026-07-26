@@ -1,16 +1,21 @@
 # syntax=docker/dockerfile:1
 
 # ---- builder ----
-# npm ci 会触发 package.json 里的 postinstall（fumadocs-mdx），
-# 生成 .source 供 next build 消费，因此必须在这一阶段装依赖，不能挪到运行阶段。
+# fumadocs-mdx 的 postinstall（bin.js）会用 existsSync 探测 next.config.*：
+# 探到就走 Next 分支，探不到就 fallback 到 Vite 分支并 `import "vite"`。而 vite
+# 只是可选 peer（未安装），所以在只 COPY 了 package*.json、next.config.mjs 还没
+# 进来的时候跑 postinstall 必然报 ERR_MODULE_NOT_FOUND: Cannot find package 'vite'。
+# 因此这里用 --ignore-scripts 先只装依赖、跳过过早的 postinstall；等 COPY . . 把
+# next.config.mjs / source.config.ts / content 都带进来后，再显式跑 postinstall
+# 生成 .source（此时能正确命中 Next 分支）供 next build 消费。
 FROM node:20-alpine AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 
 COPY . .
-RUN npm run build
+RUN npm run postinstall && npm run build
 
 # 没有启用 output: 'standalone'，next start 直接跑标准 next build 产物，运行阶段
 # 需要完整依赖树（node_modules），跟 serverExternalPackages 无关；public 目录当前仓库
