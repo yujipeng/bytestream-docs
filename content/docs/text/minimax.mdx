@@ -1,23 +1,294 @@
 ---
 title: MiniMax 系列
-description: minimax-m3 / minimax-m2.5 的 bytestream 对接说明
+description: minimax-m3 / minimax-m2.5 的 bytestream 接入指南
 ---
 
-<Callout type="warn" title="内容撰写中">
-  本页为框架骨架，具体的对接必读、模型专属参数、请求/响应示例由后续内容里程碑补充。下方 API 参考区块已可用。
+本页覆盖 **minimax-m3 / minimax-m2.5** 在 bytestream 网关（`https://aiapi.bytestream.com.cn/`）下的完整接入
+方式：全部请求参数、MiniMax 特有字段（`mask_sensitive_info`、`base_resp` 业务错误码）与响应结构差异，附
+5 组端到端请求组合示例。通用的鉴权、端点与错误码约定见 [通用说明](/docs/text)。
+
+| 调用端点 | 可用模型 | 请求组合示例 |
+| --- | --- | --- |
+| 1 | 2 | 5 |
+
+## 概览
+
+bytestream 通过 `minimax` 渠道对接 MiniMax 开放平台文本模型，使用其 OpenAI 兼容模式，将请求转换为上游
+`POST /v1/text/chatcompletion_v2` 调用。可用模型：
+
+- **minimax-m3** · 最新档位
+- **minimax-m2.5** · 上一代档位
+
+<Callout type="info">
+  **minimax-m3：** 当前最新档位，推理与工具调用能力最强，支持思考模式与长上下文；适合 Agent 编排、复杂
+  多轮对话与角色扮演类应用。
 </Callout>
 
-## 模型清单
+<Callout type="info">
+  **minimax-m2.5：** 上一代档位，单价更低、响应更快，参数集与 m3 兼容，适合成本敏感的批量对话与内容生成
+  场景；切换 `model` 即可降级，无需改动请求体。
+</Callout>
 
-| 模型 | 说明 |
+## 鉴权
+
+请求头携带 `Authorization: Bearer sk-xxxxxxxx`（`sk-` 前缀可省略）。令牌需在「控制台 → 令牌管理」中绑定
+可访问 `minimax-m3` / `minimax-m2.5` 的分组。
+
+## 调用端点
+
+| 端点 | 请求体 | 响应 | 适用场景 |
+| --- | --- | --- | --- |
+| `POST /v1/chat/completions` | JSON | `chat.completion` / SSE chunk | 全部 OpenAI 兼容调用方 |
+
+## 01 · 请求参数详解
+
+### 顶层参数
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `model` | string | 必填 | `minimax-m3` 或 `minimax-m2.5`。 |
+| `messages` | array\<object\> | 必填 | 对话消息数组，`role` 取值 `system` / `user` / `assistant` / `tool`。MiniMax 上游额外支持每项携带 `name` 作为角色昵称，可用于角色扮演场景。 |
+| `stream` | boolean | 可选 | 是否流式返回，默认 `false`。 |
+| `temperature` | number | 可选 | 采样温度，**MiniMax 侧有效范围为 `(0, 2]`**，默认约 `1`；传 `0` 会被上游拒绝，需要接近确定性输出请取一个足够小的正数（如 `0.01`）。 |
+| `top_p` | number | 可选 | 核采样阈值，`(0, 1]` 区间，默认约 `0.95`；不接受 `0`。 |
+| `max_tokens` | integer | 可选 | 最大输出 token 数（上游字段同名）。 |
+| `mask_sensitive_info` | boolean | 可选 | 是否对输出中的手机号、邮箱等敏感信息自动打码，**上游默认为 `true`**。需要原文输出（如信息抽取）时必须显式传 `false`。 |
+| `tools` | array\<object\> | 可选 | OpenAI 格式的函数定义列表；MiniMax 同时支持 `{ "type": "web_search" }` 内置联网检索工具。 |
+| `tool_choice` | string \| object | 可选 | `auto`（默认）/ `none`，或指定具体函数。 |
+| `stop` | string \| array\<string\> | 可选 | 停止序列。 |
+| `user` | string | 可选 | 终端用户标识，用于风控与用量追踪。 |
+
+<Callout type="warn" title="与 OpenAI 标准的差异点">
+  1. `temperature` / `top_p` 均**不接受 `0`**（开区间下界），`temperature` 上限为 `2`。
+  2. `mask_sensitive_info` 默认开启，输出中的敏感信息会被替换为掩码——这是最容易被忽略的行为差异，做数据
+  抽取时务必显式关闭。
+  3. `n`（多候选）、`presence_penalty`、`frequency_penalty`、`seed`、`response_format` 在上游不支持，传入
+  会被忽略。
+  4. 上游在 HTTP 200 的响应体中通过 `base_resp.status_code` 表达业务错误（见「响应结构」一节），网关会将
+  非 0 状态映射为标准错误体，但透传模式下仍可能看到该字段。
+</Callout>
+
+## 02 · 请求组合示例
+
+### 01 · 基础对话（非流式）
+
+<Tabs items={['cURL', 'Python']}>
+  <Tab value="cURL">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "minimax-m3",
+        "messages": [
+          { "role": "system", "content": "你是一名文案策划。" },
+          { "role": "user", "content": "为一款降噪耳机写三条短文案。" }
+        ],
+        "temperature": 0.9,
+        "max_tokens": 1024
+      }'
+    ```
+  </Tab>
+  <Tab value="Python">
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key="sk-your-token",
+        base_url="https://aiapi.bytestream.com.cn/v1",
+    )
+
+    resp = client.chat.completions.create(
+        model="minimax-m3",
+        messages=[
+            {"role": "system", "content": "你是一名文案策划。"},
+            {"role": "user", "content": "为一款降噪耳机写三条短文案。"},
+        ],
+        temperature=0.9,
+        max_tokens=1024,
+    )
+    print(resp.choices[0].message.content)
+    ```
+  </Tab>
+</Tabs>
+
+### 02 · 流式输出
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "minimax-m2.5",
+    "messages": [{ "role": "user", "content": "讲一个三百字的科幻小故事" }],
+    "stream": true
+  }'
+```
+
+### 03 · 关闭敏感信息打码（信息抽取）
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "minimax-m3",
+    "messages": [{
+      "role": "user",
+      "content": "从这段文本中抽取联系方式：客户王五，手机 13800000000，邮箱 wang@example.com"
+    }],
+    "mask_sensitive_info": false,
+    "temperature": 0.01
+  }'
+```
+
+<Callout type="warn">
+  若不传 `mask_sensitive_info: false`，上述手机号与邮箱在输出中会被替换为掩码形式，看起来像"模型抽取错误"，
+  实际是上游的默认脱敏行为。OpenAI 官方 SDK 下该字段需通过 `extra_body` 传入。
+</Callout>
+
+### 04 · 工具调用
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "minimax-m3",
+    "messages": [{ "role": "user", "content": "帮我把这条会议记录建成日程" }],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "create_event",
+          "description": "创建一条日程",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "start_at": { "type": "string", "description": "ISO 8601 时间" }
+            },
+            "required": ["title", "start_at"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto"
+  }'
+```
+
+<Callout type="info">
+  MiniMax 上游返回的 `tool_calls[].function.arguments` 为 JSON 字符串，与 OpenAI 一致；但流式下分片粒度较粗，
+  按 `index` 累加拼接后再解析即可。
+</Callout>
+
+### 05 · 角色昵称多轮对话
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "minimax-m3",
+    "messages": [
+      { "role": "system", "content": "你在扮演一位耐心的历史老师。", "name": "旁白" },
+      { "role": "user", "content": "宋朝为什么重文轻武？", "name": "学生" }
+    ],
+    "temperature": 0.8
+  }'
+```
+
+<Callout type="info">
+  `name` 字段是 MiniMax 对角色扮演场景的扩展，可为每条消息指定说话人昵称；不需要该能力时可完全省略，行为与
+  标准 OpenAI 请求一致。
+</Callout>
+
+## 03 · 响应结构
+
+```json
+{
+  "id": "chatcmpl-1b2c3d4e5f608a1b",
+  "object": "chat.completion",
+  "created": 1721900000,
+  "model": "minimax-m3",
+  "choices": [
+    {
+      "index": 0,
+      "message": { "role": "assistant", "content": "..." },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 88, "completion_tokens": 356, "total_tokens": 444 },
+  "base_resp": { "status_code": 0, "status_msg": "" }
+}
+```
+
+`finish_reason` 取值：`stop` / `length` / `tool_calls`。
+
+<Callout type="warn" title="base_resp 业务错误">
+  MiniMax 上游习惯在 **HTTP 200** 的响应体中用 `base_resp.status_code` 表达业务错误（`0` 为成功）。常见取值：
+  `1002` 触发限流、`1004` 鉴权失败、`1008` 余额不足、`1013` 服务内部错误、`2013` 输入格式非法。bytestream
+  会把非 `0` 状态映射为标准 HTTP 错误码与 `error` 错误体，但如果你直接读取原始响应，请同时校验该字段，
+  不要只看 HTTP 状态码。
+</Callout>
+
+## 04 · 附录
+
+### 错误码
+
+| 状态码 | 说明 |
 | --- | --- |
-| `minimax-m3` | MiniMax 系列 |
-| `minimax-m2.5` | MiniMax 系列 |
+| `200` | 请求成功（仍需校验 `base_resp.status_code == 0`） |
+| `400` | 参数错误 · `invalid_request`（常见于 `temperature` 或 `top_p` 传 `0`） |
+| `401` | 令牌无效 · `invalid_api_key`（上游 `base_resp 1004`） |
+| `402` | 额度不足 · `insufficient_user_quota`（上游 `base_resp 1008`） |
+| `404` | 模型不存在或令牌分组无权访问 |
+| `429` | 触发限流 · `rate_limit_exceeded`（上游 `base_resp 1002`） |
+| `500` | 上游 / 网关内部错误（上游 `base_resp 1013`） |
 
-## 对接必读
+错误体统一为 `{"error": {"message", "type", "param", "code"}}`。
 
-_TODO：MiniMax 特有字段等与 OpenAI 标准的差异点将在此补充。_
+### 速查
 
-## API 参考
+<Tabs items={['完整参数请求体', '字段速查', '鉴权头']}>
+  <Tab value="完整参数请求体">
+    ```json
+    {
+      "model": "minimax-m3",
+      "messages": [{ "role": "user", "content": "...", "name": "学生" }],
+      "stream": true,
+      "temperature": 1,
+      "top_p": 0.95,
+      "max_tokens": 4096,
+      "stop": ["\n\n"],
+      "mask_sensitive_info": false,
+      "tools": [{ "type": "function", "function": { "name": "...", "parameters": {} } }],
+      "tool_choice": "auto",
+      "user": "u_10086"
+    }
+    ```
+  </Tab>
+  <Tab value="字段速查">
+    ```text
+    model               minimax-m3 / minimax-m2.5
+    temperature         (0, 2]，不接受 0
+    top_p               (0, 1]，不接受 0
+    mask_sensitive_info 默认 true（会打码）
+    messages[].name     角色昵称（MiniMax 扩展）
+    base_resp.status_code
+                        0 为成功，需校验
+    不支持               n / presence_penalty
+                        / frequency_penalty
+                        / seed / response_format
+    ```
+  </Tab>
+  <Tab value="鉴权头">
+    ```text
+    Authorization: Bearer sk-xxxxxxxxxxxx
+    ```
+  </Tab>
+</Tabs>
 
-参见 [MiniMax 系列 API 参考](/docs/text/reference/minimax)。
+---
+
+bytestream · minimax 渠道 · MiniMax 系列接入文档 —— 本文档为接入示例（非官方最终版），供接口联调参考。

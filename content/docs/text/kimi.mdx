@@ -1,25 +1,343 @@
 ---
 title: Kimi 系列
-description: kimi-2.7 / kimi-2.6 / kimi-2.5 的 bytestream 对接说明
+description: kimi-2.7 / kimi-2.6 / kimi-2.5 的 bytestream 接入指南
 ---
 
-<Callout type="warn" title="内容撰写中">
-  本页为框架骨架，具体的对接必读（如思考模式参数）、模型专属参数、请求/响应示例由后续内容里程碑补充。
-  下方 API 参考区块已可用。
+本页覆盖 **kimi-2.7 / kimi-2.6 / kimi-2.5** 在 bytestream 网关（`https://aiapi.bytestream.com.cn/`）下的完整
+接入方式：全部请求参数、Kimi 专属的联网搜索内置工具与思考模式、响应结构差异，附 5 组端到端请求组合示例。
+通用的鉴权、端点与错误码约定见 [通用说明](/docs/text)。
+
+| 调用端点 | 可用模型 | 请求组合示例 |
+| --- | --- | --- |
+| 1 | 3 | 5 |
+
+## 概览
+
+bytestream 通过 `moonshot` 渠道对接月之暗面 Kimi 系列模型，请求以 OpenAI 兼容格式提交，转换为上游
+`POST /v1/chat/completions` 调用。可用模型：
+
+- **kimi-2.7** · 最新档位
+- **kimi-2.6** · 上一代档位
+- **kimi-2.5** · 基础档位
+
+<Callout type="info">
+  **kimi-2.7：** 当前最新档位，长上下文与 Agent 工具调用能力最强，支持思考模式与内置联网搜索；适合长文档
+  问答、代码库分析等重任务。
 </Callout>
 
-## 模型清单
+<Callout type="info">
+  **kimi-2.6：** 上一代档位，能力接近 2.7 而单价更低，适合已在生产验证过 prompt 的存量业务平滑迁移。
+</Callout>
 
-| 模型 | 说明 |
+<Callout type="info">
+  **kimi-2.5：** 基础档位，响应最快、单价最低，适合摘要、分类、改写等轻量高并发任务；推理类能力建议使用
+  `kimi-2.6` 及以上档位。
+</Callout>
+
+## 鉴权
+
+请求头携带 `Authorization: Bearer sk-xxxxxxxx`（`sk-` 前缀可省略）。令牌需在「控制台 → 令牌管理」中绑定
+可访问 `kimi-2.7` / `kimi-2.6` / `kimi-2.5` 的分组。
+
+## 调用端点
+
+| 端点 | 请求体 | 响应 | 适用场景 |
+| --- | --- | --- | --- |
+| `POST /v1/chat/completions` | JSON | `chat.completion` / SSE chunk | 全部 OpenAI 兼容调用方 |
+
+## 01 · 请求参数详解
+
+### 顶层参数
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `model` | string | 必填 | `kimi-2.7` / `kimi-2.6` / `kimi-2.5`。 |
+| `messages` | array\<object\> | 必填 | 对话消息数组，`role` 取值 `system` / `user` / `assistant` / `tool`；`content` 支持字符串或多模态内容数组。 |
+| `stream` | boolean | 可选 | 是否流式返回，默认 `false`。 |
+| `stream_options` | object | 可选 | `{ "include_usage": true }` 可在最后一个 chunk 中带回 `usage`。 |
+| `temperature` | number | 可选 | 采样温度，**Kimi 侧有效范围为 `[0, 1]`**（不同于 OpenAI 的 `0~2`），默认约 `0.6`；官方建议 `0.3` 用于确定性任务。 |
+| `top_p` | number | 可选 | 核采样阈值，范围 `(0, 1]`，默认 `1`。 |
+| `n` | integer | 可选 | 生成候选数量，范围 `1~5`，默认 `1`；大于 1 时要求 `temperature` 大于 0。 |
+| `max_tokens` | integer | 可选 | 最大输出 token 数；不传时上游按剩余上下文自动决定。 |
+| `stop` | string \| array\<string\> | 可选 | 停止序列，最多 5 项，每项长度不超过 32 字节。 |
+| `presence_penalty` | number | 可选 | 主题新鲜度惩罚，范围 `[-2, 2]`，默认 `0`。 |
+| `frequency_penalty` | number | 可选 | 重复词惩罚，范围 `[-2, 2]`，默认 `0`。 |
+| `response_format` | object | 可选 | `{ "type": "json_object" }` 强制 JSON 输出；使用时需在 prompt 中同时说明"以 JSON 输出"。 |
+| `tools` | array\<object\> | 可选 | 工具列表，支持 `{ "type": "function", ... }` 自定义函数与 `{ "type": "builtin_function", "function": { "name": "$web_search" } }` 内置联网搜索。 |
+| `tool_choice` | string \| object | 可选 | `auto`（默认）/ `none` / `required`，或指定具体函数。 |
+| `thinking` | object | 可选 | 思考模式开关：`{ "type": "enabled" }` / `{ "type": "disabled" }`；思考内容通过 `reasoning_content` 返回。 |
+| `user` | string | 可选 | 终端用户标识，用于风控与用量追踪。 |
+
+<Callout type="warn" title="与 OpenAI 标准的差异点">
+  1. `temperature` 上限为 **`1`**，而非 `2`；传更大的值会被上游拒绝。
+  2. `n` 最大为 `5`，且与 `temperature: 0` 互斥。
+  3. `stop` 最多 5 项，单项长度上限 32 字节。
+  4. 内置联网搜索走的是 **`builtin_function`** 类型的特殊工具（见下节），与其他供应商的 `web_search` 写法
+  不同，且需要调用方在收到 `tool_calls` 后回传一次占位结果。
+  5. `seed` 在上游不支持，传入会被忽略。
+</Callout>
+
+### 内置联网搜索（$web_search）
+
+作为 `tools` 中的一项传入：
+
+```json
+{
+  "type": "builtin_function",
+  "function": { "name": "$web_search" }
+}
+```
+
+<Callout type="warn" title="需要一次回传">
+  与"服务端自动检索并直接给答案"的模式不同，Kimi 的内置搜索走标准工具调用回路：模型先返回
+  `finish_reason: "tool_calls"` 且 `tool_calls[].function.name == "$web_search"`，调用方**不需要真正执行搜索**，
+  只需把该次调用的 `arguments` 原样作为 `role: "tool"` 消息的 `content` 回传，上游即在服务端完成检索并继续
+  生成。漏掉这一步会导致对话停在工具调用状态。搜索按次计费，与 token 费用分开结算。
+</Callout>
+
+### 多模态内容数组
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `type` | string | `"text"` / `"image_url"` |
+| `text` | string | 当 `type="text"` 时的文本内容。 |
+| `image_url.url` | string | 图片地址，支持公网 URL 或 `data:image/png;base64,...` 内联。 |
+
+## 02 · 请求组合示例
+
+### 01 · 基础对话（非流式）
+
+<Tabs items={['cURL', 'Python']}>
+  <Tab value="cURL">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "kimi-2.7",
+        "messages": [
+          { "role": "system", "content": "你是 Kimi，一名严谨的资料整理助手。" },
+          { "role": "user", "content": "把这份会议记录整理成待办清单。" }
+        ],
+        "temperature": 0.3,
+        "max_tokens": 2048
+      }'
+    ```
+  </Tab>
+  <Tab value="Python">
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key="sk-your-token",
+        base_url="https://aiapi.bytestream.com.cn/v1",
+    )
+
+    resp = client.chat.completions.create(
+        model="kimi-2.7",
+        messages=[
+            {"role": "system", "content": "你是 Kimi，一名严谨的资料整理助手。"},
+            {"role": "user", "content": "把这份会议记录整理成待办清单。"},
+        ],
+        temperature=0.3,
+        max_tokens=2048,
+    )
+    print(resp.choices[0].message.content)
+    ```
+  </Tab>
+</Tabs>
+
+### 02 · 流式输出 + usage 统计
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "kimi-2.6",
+    "messages": [{ "role": "user", "content": "简述 Raft 与 Paxos 的差异" }],
+    "stream": true,
+    "stream_options": { "include_usage": true }
+  }'
+```
+
+### 03 · 思考模式
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "kimi-2.7",
+    "messages": [{ "role": "user", "content": "推导这段缓存穿透方案的漏洞并给出修法" }],
+    "thinking": { "type": "enabled" },
+    "max_tokens": 8192
+  }'
+```
+
+思考内容位于 `message.reasoning_content`（流式为 `delta.reasoning_content`），与正文分开返回并计入输出 token。
+
+### 04 · 内置联网搜索（含结果回传）
+
+第一轮请求：
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "kimi-2.7",
+    "messages": [{ "role": "user", "content": "今年国内新能源补贴政策有什么变化？" }],
+    "tools": [{ "type": "builtin_function", "function": { "name": "$web_search" } }]
+  }'
+```
+
+第二轮把工具调用的 `arguments` 原样回传：
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "kimi-2.7",
+    "messages": [
+      { "role": "user", "content": "今年国内新能源补贴政策有什么变化？" },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+          "id": "call_1",
+          "type": "builtin_function",
+          "function": { "name": "$web_search", "arguments": "{\"query\":\"新能源补贴政策\"}" }
+        }]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "name": "$web_search",
+        "content": "{\"query\":\"新能源补贴政策\"}"
+      }
+    ],
+    "tools": [{ "type": "builtin_function", "function": { "name": "$web_search" } }]
+  }'
+```
+
+### 05 · JSON 输出
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "kimi-2.7",
+    "messages": [
+      { "role": "system", "content": "请以 JSON 输出结果。" },
+      { "role": "user", "content": "抽取：赵六，数据工程师，7 年经验" }
+    ],
+    "response_format": { "type": "json_object" },
+    "temperature": 0
+  }'
+```
+
+<Callout type="warn">
+  `temperature: 0` 与 `n > 1` 不能同时使用；JSON 模式要求 prompt 中显式出现"JSON"字样，且该系列不支持
+  `json_schema` 严格结构化输出，需要 schema 约束时改用自定义函数工具。
+</Callout>
+
+## 03 · 响应结构
+
+```json
+{
+  "id": "chatcmpl-3d4e5f608a1b2c3d",
+  "object": "chat.completion",
+  "created": 1721900000,
+  "model": "kimi-2.7",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "...",
+        "reasoning_content": "（开启 thinking 时才有）"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 104,
+    "completion_tokens": 480,
+    "total_tokens": 584,
+    "cached_tokens": 0
+  }
+}
+```
+
+`finish_reason` 取值：`stop` / `length` / `tool_calls`。`usage.cached_tokens` 为上下文缓存命中量（若账号开启了
+上下文缓存），命中部分按更低单价结算。
+
+## 04 · 附录
+
+### 错误码
+
+| 状态码 | 说明 |
 | --- | --- |
-| `kimi-2.7` | Kimi 系列 |
-| `kimi-2.6` | Kimi 系列 |
-| `kimi-2.5` | Kimi 系列 |
+| `200` | 请求成功 |
+| `400` | 参数错误 · `invalid_request`（常见于 `temperature > 1`、`stop` 超过 5 项、`n > 5`） |
+| `401` | 令牌无效 · `invalid_api_key` |
+| `402` | 额度不足 · `insufficient_user_quota` |
+| `404` | 模型不存在或令牌分组无权访问 |
+| `429` | 触发限流 · `rate_limit_exceeded`（Kimi 上游对并发与 TPM 双重限速，建议指数退避） |
+| `500` | 上游 / 网关内部错误 |
 
-## 对接必读
+错误体统一为 `{"error": {"message", "type", "param", "code"}}`。
 
-_TODO：思考模式参数等与 OpenAI 标准的差异点将在此补充。_
+### 速查
 
-## API 参考
+<Tabs items={['完整参数请求体', '字段速查', '鉴权头']}>
+  <Tab value="完整参数请求体">
+    ```json
+    {
+      "model": "kimi-2.7",
+      "messages": [{ "role": "user", "content": "..." }],
+      "stream": true,
+      "stream_options": { "include_usage": true },
+      "temperature": 0.6,
+      "top_p": 1,
+      "n": 1,
+      "max_tokens": 8192,
+      "stop": ["\n\n"],
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "thinking": { "type": "enabled" },
+      "response_format": { "type": "json_object" },
+      "tools": [
+        { "type": "builtin_function", "function": { "name": "$web_search" } }
+      ],
+      "tool_choice": "auto",
+      "user": "u_10086"
+    }
+    ```
+  </Tab>
+  <Tab value="字段速查">
+    ```text
+    model         kimi-2.7 / 2.6 / 2.5
+    temperature   [0, 1]（注意上限为 1）
+    top_p         (0, 1]
+    n             1~5，且与 temperature=0 互斥
+    stop          最多 5 项，单项 ≤32 字节
+    thinking      enabled / disabled
+    联网搜索       builtin_function
+                  + $web_search，需回传
+    不支持         seed / json_schema
+    ```
+  </Tab>
+  <Tab value="鉴权头">
+    ```text
+    Authorization: Bearer sk-xxxxxxxxxxxx
+    ```
+  </Tab>
+</Tabs>
 
-参见 [Kimi 系列 API 参考](/docs/text/reference/kimi)。
+---
+
+bytestream · moonshot 渠道 · Kimi 系列接入文档 —— 本文档为接入示例（非官方最终版），供接口联调参考。

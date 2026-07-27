@@ -1,23 +1,329 @@
 ---
 title: OpenAI 系列
-description: gpt-5.6 / gpt-5.5 等 codex 可用模型的 bytestream 对接说明
+description: gpt-5.6 / gpt-5.5 等 codex 可用模型的 bytestream 接入指南
 ---
 
-<Callout type="warn" title="内容撰写中">
-  本页为框架骨架，具体的对接必读、模型专属参数、请求/响应示例由后续内容里程碑补充。下方 API 参考区块已可用。
+本页覆盖 **gpt-5.6 / gpt-5.5** 在 bytestream 网关（`https://aiapi.bytestream.com.cn/`）下的完整接入方式：
+全部请求参数、OpenAI 兼容响应结构、流式与工具调用的传参技巧，附 5 组端到端请求组合示例。通用的鉴权、
+端点与错误码约定见 [通用说明](/docs/text)，本页只展开该系列的差异点与完整字段清单。
+
+| 调用端点 | 可用模型 | 请求组合示例 |
+| --- | --- | --- |
+| 1 | 2 | 5 |
+
+## 概览
+
+bytestream 通过 OpenAI 兼容渠道对接该系列模型，客户端请求以 `POST /v1/chat/completions` 语义直通上游
+Chat Completions 接口。可用模型：
+
+- **gpt-5.6** · codex 可用模型
+- **gpt-5.5** · codex 可用模型
+
+<Callout type="info">
+  **gpt-5.6：** 该系列当前最新档位，适合代码生成、Agent 工具调用与长上下文推理场景；支持 `reasoning_effort`
+  推理强度调节与并行工具调用。codex 类客户端把 base URL 指向 bytestream 网关后即可选用该模型。
 </Callout>
 
-## 模型清单
+<Callout type="info">
+  **gpt-5.5：** 上一代稳定档位，单价更低、响应更快，适合对推理深度要求不高的批量任务与线上兜底。参数集与
+  gpt-5.6 兼容，切换模型无需改动请求体。
+</Callout>
 
-| 模型 | 说明 |
+## 鉴权
+
+请求头携带 `Authorization: Bearer sk-xxxxxxxx`（`sk-` 前缀可省略）。令牌需在「控制台 → 令牌管理」中绑定
+可访问 `gpt-5.6` / `gpt-5.5` 的分组，否则返回 `401 invalid_api_key` 或额度类错误。
+
+## 调用端点
+
+| 端点 | 请求体 | 响应 | 适用场景 |
+| --- | --- | --- | --- |
+| `POST /v1/chat/completions` | JSON | `chat.completion` / `chat.completion.chunk`（SSE） | 全部 OpenAI 兼容调用方（官方 SDK、codex、LangChain 等） |
+
+<Callout type="info">
+  该端点在全部文本供应商系列之间共用，仅 `model` 取值决定实际路由的上游。因此同一份客户端代码只需替换
+  `model` 字段即可在各系列之间切换。
+</Callout>
+
+## 01 · 请求参数详解
+
+### 顶层参数
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `model` | string | 必填 | `gpt-5.6` 或 `gpt-5.5`。 |
+| `messages` | array\<object\> | 必填 | 对话消息数组，每项 `{ role, content }`，`role` 取值 `system` / `user` / `assistant` / `tool`。`content` 支持字符串或多模态内容数组（见下节）。 |
+| `stream` | boolean | 可选 | 是否流式返回，默认 `false`；为 `true` 时响应为 `text/event-stream`。 |
+| `stream_options` | object | 可选 | 流式附加选项，`{ "include_usage": true }` 可在最后一个 chunk 中带回 `usage` 统计。 |
+| `temperature` | number | 可选 | 采样温度，范围 `0~2`，默认 `1`；值越大输出越随机。 |
+| `top_p` | number | 可选 | 核采样阈值，范围 `0~1`，与 `temperature` 建议只调其一。 |
+| `max_tokens` | integer | 可选 | 本次生成的最大输出 token 数；不传则由上游按模型上限决定。 |
+| `stop` | string \| array\<string\> | 可选 | 停止序列，最多 4 项，命中后立即结束生成（不含停止串本身）。 |
+| `n` | integer | 可选 | 生成候选数量，默认 `1`；大于 1 时 `choices` 返回多项，按总输出 token 计费。 |
+| `presence_penalty` | number | 可选 | 主题新鲜度惩罚，范围 `-2~2`，默认 `0`。 |
+| `frequency_penalty` | number | 可选 | 重复词惩罚，范围 `-2~2`，默认 `0`。 |
+| `seed` | integer | 可选 | 采样种子，尽力保证相同输入下输出可复现（非严格保证）。 |
+| `response_format` | object | 可选 | 输出格式约束：`{ "type": "json_object" }` 强制合法 JSON；`{ "type": "json_schema", "json_schema": {...} }` 按 schema 结构化输出。 |
+| `tools` | array\<object\> | 可选 | 工具（函数）定义列表，每项 `{ "type": "function", "function": { name, description, parameters } }`。 |
+| `tool_choice` | string \| object | 可选 | 工具选择策略：`auto`（默认）/ `none` / `required`，或 `{ "type": "function", "function": { "name": "..." } }` 强制指定。 |
+| `parallel_tool_calls` | boolean | 可选 | 是否允许一轮内返回多个工具调用，默认 `true`。 |
+| `reasoning_effort` | string | 可选 | 推理强度：`minimal` / `low` / `medium`（默认）/ `high`；调高会显著增加推理 token 与耗时。 |
+| `user` | string | 可选 | 调用方自定义的终端用户标识，用于风控与用量追踪。 |
+
+<Callout type="warn" title="未在上表列出的字段">
+  bytestream 对该系列采用**透传**策略：上表之外的 OpenAI 官方字段会原样转发给上游，能力以上游模型实际支持
+  为准；网关不做二次校验，因此拼写错误的字段可能被上游直接拒绝并返回 `400 invalid_request`。
+</Callout>
+
+### 多模态内容数组
+
+当需要在单条消息中混排文本与图片时，把 `content` 写成内容项数组：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `type` | string | `"text"` / `"image_url"` |
+| `text` | string | 当 `type="text"` 时的文本内容。 |
+| `image_url.url` | string | 图片地址，支持公网 URL 或 `data:image/png;base64,...` 内联。 |
+| `image_url.detail` | string | 图像解析精度：`auto`（默认）/ `low` / `high`，`high` 会消耗更多输入 token。 |
+
+## 02 · 请求组合示例
+
+### 01 · 基础对话（非流式）
+
+<Tabs items={['cURL', 'Python']}>
+  <Tab value="cURL">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "gpt-5.6",
+        "messages": [
+          { "role": "system", "content": "你是一名严谨的后端工程师。" },
+          { "role": "user", "content": "用 Go 写一个带超时的 HTTP 客户端。" }
+        ],
+        "temperature": 0.3,
+        "max_tokens": 1024
+      }'
+    ```
+  </Tab>
+  <Tab value="Python">
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key="sk-your-token",
+        base_url="https://aiapi.bytestream.com.cn/v1",
+    )
+
+    resp = client.chat.completions.create(
+        model="gpt-5.6",
+        messages=[
+            {"role": "system", "content": "你是一名严谨的后端工程师。"},
+            {"role": "user", "content": "用 Go 写一个带超时的 HTTP 客户端。"},
+        ],
+        temperature=0.3,
+        max_tokens=1024,
+    )
+    print(resp.choices[0].message.content)
+    ```
+  </Tab>
+</Tabs>
+
+### 02 · 流式输出 + usage 统计
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.6",
+    "messages": [{ "role": "user", "content": "逐步讲解快速排序" }],
+    "stream": true,
+    "stream_options": { "include_usage": true }
+  }'
+```
+
+<Callout type="info">
+  开启 `stream_options.include_usage` 后，`usage` 出现在 `data: [DONE]` 之前的最后一个 chunk 中，该 chunk 的
+  `choices` 为空数组，解析时需要跳过而不是当作异常。
+</Callout>
+
+### 03 · 工具调用（Function Calling）
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.6",
+    "messages": [{ "role": "user", "content": "北京今天天气怎么样？" }],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "查询指定城市的实时天气",
+          "parameters": {
+            "type": "object",
+            "properties": { "city": { "type": "string" } },
+            "required": ["city"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto"
+  }'
+```
+
+模型返回 `finish_reason: "tool_calls"` 与 `message.tool_calls` 数组；执行完本地函数后，把结果以
+`{ "role": "tool", "tool_call_id": "...", "content": "..." }` 追加进 `messages` 再次请求，即可拿到最终回答。
+
+### 04 · 结构化输出（JSON Schema）
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.6",
+    "messages": [{ "role": "user", "content": "把这段简历抽取为结构化字段：张三，5 年后端经验" }],
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "resume",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "years": { "type": "integer" }
+          },
+          "required": ["name", "years"],
+          "additionalProperties": false
+        }
+      }
+    }
+  }'
+```
+
+### 05 · 多模态图文输入
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.6",
+    "messages": [{
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "这张架构图里有哪些单点故障风险？" },
+        { "type": "image_url", "image_url": { "url": "https://cdn.example.com/arch.png", "detail": "high" } }
+      ]
+    }]
+  }'
+```
+
+## 03 · 响应结构
+
+### 非流式响应
+
+```json
+{
+  "id": "chatcmpl-9f3a2b7c1e4d5f60",
+  "object": "chat.completion",
+  "created": 1721900000,
+  "model": "gpt-5.6",
+  "choices": [
+    {
+      "index": 0,
+      "message": { "role": "assistant", "content": "..." },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 42, "completion_tokens": 318, "total_tokens": 360 }
+}
+```
+
+`finish_reason` 取值：`stop`（正常结束）/ `length`（触达 `max_tokens`）/ `tool_calls`（等待工具结果）/
+`content_filter`（内容审核拦截）。
+
+### 流式响应
+
+```text
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"快"}}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+data: [DONE]
+```
+
+<Callout type="warn">
+  流式下 `usage` 仅在显式开启 `stream_options.include_usage` 时返回；工具调用的参数以 `delta.tool_calls[].function.arguments`
+  分片下发，需要按 `index` 累加拼接后才是完整 JSON。
+</Callout>
+
+## 04 · 附录
+
+### 错误码
+
+| 状态码 | 说明 |
 | --- | --- |
-| `gpt-5.6` | codex 可用模型 |
-| `gpt-5.5` | codex 可用模型 |
+| `200` | 请求成功 |
+| `400` | 参数错误 · `invalid_request` |
+| `401` | 令牌无效 · `invalid_api_key` |
+| `402` | 额度不足 · `insufficient_user_quota` |
+| `404` | 模型不存在或令牌分组无权访问 |
+| `429` | 触发限流 · `rate_limit_exceeded` |
+| `500` | 上游 / 网关内部错误 |
 
-## 对接必读
+错误体统一为 `{"error": {"message", "type", "param", "code"}}`。
 
-_TODO：与 OpenAI 标准的差异点（如有）将在此补充。_
+### 速查
 
-## API 参考
+<Tabs items={['完整参数请求体', '字段速查', '鉴权头']}>
+  <Tab value="完整参数请求体">
+    ```json
+    {
+      "model": "gpt-5.6",
+      "messages": [{ "role": "user", "content": "..." }],
+      "stream": true,
+      "stream_options": { "include_usage": true },
+      "temperature": 0.7,
+      "top_p": 1,
+      "max_tokens": 2048,
+      "stop": ["\n\n"],
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "seed": 42,
+      "reasoning_effort": "medium",
+      "response_format": { "type": "json_object" },
+      "tools": [{ "type": "function", "function": { "name": "...", "parameters": {} } }],
+      "tool_choice": "auto",
+      "parallel_tool_calls": true,
+      "user": "u_10086"
+    }
+    ```
+  </Tab>
+  <Tab value="字段速查">
+    ```text
+    model            gpt-5.6 / gpt-5.5
+    temperature      0~2（默认 1）
+    top_p            0~1
+    stop             最多 4 项
+    reasoning_effort minimal/low/medium/high
+    response_format  json_object / json_schema
+    tool_choice      auto/none/required/{function}
+    finish_reason    stop/length/tool_calls
+                     /content_filter
+    ```
+  </Tab>
+  <Tab value="鉴权头">
+    ```text
+    Authorization: Bearer sk-xxxxxxxxxxxx
+    ```
+  </Tab>
+</Tabs>
 
-参见 [OpenAI 系列 API 参考](/docs/text/reference/openai)。
+---
+
+bytestream · OpenAI 兼容渠道 · OpenAI 系列接入文档 —— 本文档为接入示例（非官方最终版），供接口联调参考。

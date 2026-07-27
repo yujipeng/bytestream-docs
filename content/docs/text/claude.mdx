@@ -1,24 +1,321 @@
 ---
 title: Claude 系列
-description: claude-opus-4.8 / claude-sonnet-5 等 Claude CLI 可用模型的 bytestream 对接说明
+description: claude-opus-4.8 / claude-sonnet-5 等 Claude CLI 可用模型的 bytestream 接入指南
 ---
 
-<Callout type="warn" title="内容撰写中">
-  本页为框架骨架，具体的对接必读（如 system 独立字段处理）、模型专属参数、请求/响应示例由后续内容里程碑补充。
-  下方 API 参考区块已可用。
+本页覆盖 **claude-opus-4.8 / claude-sonnet-5** 在 bytestream 网关（`https://aiapi.bytestream.com.cn/`）下的
+完整接入方式：全部请求参数、与 OpenAI 标准的差异点（`system` 独立字段、思考块、工具调用格式），附 5 组
+端到端请求组合示例。通用的鉴权、端点与错误码约定见 [通用说明](/docs/text)。
+
+| 调用端点 | 可用模型 | 请求组合示例 |
+| --- | --- | --- |
+| 1 | 2 | 5 |
+
+## 概览
+
+bytestream 通过 `anthropic` 渠道对接 Claude 系列模型，将 OpenAI 兼容请求转换为上游
+`POST /v1/messages` 调用。可用模型：
+
+- **claude-opus-4.8** · Claude CLI 可用模型
+- **claude-sonnet-5** · Claude CLI 可用模型
+
+<Callout type="info">
+  **claude-opus-4.8：** 该系列推理能力最强的档位，面向复杂代码库改写、长链路 Agent 任务与深度分析；支持
+  扩展思考（extended thinking）与并行工具调用。上下文与单次输出上限以「控制台 → 模型管理」展示为准。
 </Callout>
 
-## 模型清单
+<Callout type="info">
+  **claude-sonnet-5：** 平衡档位，速度与单价显著优于 opus，日常编码、摘要、结构化抽取场景的默认选择；参数
+  集与 opus 完全一致，可直接切换 `model` 做成本降级。
+</Callout>
 
-| 模型 | 说明 |
+## 鉴权
+
+请求头携带 `Authorization: Bearer sk-xxxxxxxx`（`sk-` 前缀可省略）。令牌需在「控制台 → 令牌管理」中绑定
+可访问 `claude-opus-4.8` / `claude-sonnet-5` 的分组。
+
+<Callout type="info">
+  若使用 Anthropic 官方 SDK 或 Claude CLI，把 base URL 指向 `https://aiapi.bytestream.com.cn`，鉴权头可写为
+  `x-api-key: sk-xxxxxxxx`，网关同时接受这两种写法。
+</Callout>
+
+## 调用端点
+
+| 端点 | 请求体 | 响应 | 适用场景 |
+| --- | --- | --- | --- |
+| `POST /v1/chat/completions` | JSON（OpenAI 格式） | `chat.completion` / SSE chunk | OpenAI SDK、LangChain 等兼容调用方 |
+
+<Callout type="warn" title="消息格式转换">
+  bytestream 接收的是 **OpenAI 格式**请求体，由网关负责转换为上游 Anthropic Messages 格式。因此
+  `messages` 中的 `role: "system"` 项会被网关抽取为上游的独立 `system` 参数，无需（也不应）自行改写为
+  Anthropic 原生结构。
+</Callout>
+
+## 01 · 请求参数详解
+
+### 顶层参数
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `model` | string | 必填 | `claude-opus-4.8` 或 `claude-sonnet-5`。 |
+| `messages` | array\<object\> | 必填 | 对话消息数组。`role` 取值 `system` / `user` / `assistant` / `tool`；`content` 支持字符串或多模态内容数组。 |
+| `stream` | boolean | 可选 | 是否流式返回，默认 `false`。 |
+| `max_tokens` | integer | 可选 | 最大输出 token 数。**上游 Anthropic 接口要求该字段必填**，未传时网关会按模型默认上限补齐，建议显式指定以控制成本。 |
+| `temperature` | number | 可选 | 采样温度，**Anthropic 侧有效范围为 `0~1`**（不同于 OpenAI 的 `0~2`）；传入大于 1 的值会被上游拒绝。 |
+| `top_p` | number | 可选 | 核采样阈值，范围 `0~1`；官方建议与 `temperature` 只调其一。 |
+| `top_k` | integer | 可选 | 仅从概率最高的 K 个候选词中采样，Anthropic 专属参数，OpenAI 标准中不存在。 |
+| `stop` | string \| array\<string\> | 可选 | 停止序列，映射为上游 `stop_sequences`。 |
+| `tools` | array\<object\> | 可选 | OpenAI 格式的函数定义，由网关转换为上游 `tools`（`input_schema`）。 |
+| `tool_choice` | string \| object | 可选 | `auto` / `none` / `required`，或指定具体函数；映射为上游 `tool_choice`。 |
+| `thinking` | object | 可选 | 扩展思考开关：`{ "type": "enabled", "budget_tokens": 8192 }`。开启后 `budget_tokens` 必须小于 `max_tokens`。 |
+| `user` | string | 可选 | 终端用户标识，用于风控与用量追踪。 |
+
+<Callout type="warn" title="与 OpenAI 标准的差异点">
+  1. `temperature` 上限为 `1`，而非 `2`。
+  2. `max_tokens` 在上游为必填字段，强烈建议显式传入。
+  3. `n`（多候选）、`presence_penalty`、`frequency_penalty`、`seed`、`response_format` 在 Anthropic 上游
+  **不支持**，传入会被忽略（不报错），需要 JSON 输出时改用工具调用或在 prompt 中约束。
+  4. Anthropic 要求 `messages` 中 user / assistant 严格交替，且首条非 system 消息必须为 `user`；不满足时上游
+  返回 `400`。
+</Callout>
+
+### 多模态内容数组
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `type` | string | `"text"` / `"image_url"` |
+| `text` | string | 当 `type="text"` 时的文本内容。 |
+| `image_url.url` | string | 图片地址，支持公网 URL 或 `data:image/png;base64,...` 内联；网关会转换为上游 `source.type=base64/url` 结构。 |
+
+支持的图片格式为 JPEG / PNG / GIF / WebP，单图建议长边不超过 1568 px，超出会被上游等比缩放。
+
+## 02 · 请求组合示例
+
+### 01 · 基础对话（system + 非流式）
+
+<Tabs items={['cURL', 'Python']}>
+  <Tab value="cURL">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "claude-opus-4.8",
+        "messages": [
+          { "role": "system", "content": "你是一名资深代码审查员，只指出真实缺陷。" },
+          { "role": "user", "content": "审查这段 Go 代码的并发安全性。" }
+        ],
+        "max_tokens": 2048,
+        "temperature": 0.2
+      }'
+    ```
+  </Tab>
+  <Tab value="Python">
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key="sk-your-token",
+        base_url="https://aiapi.bytestream.com.cn/v1",
+    )
+
+    resp = client.chat.completions.create(
+        model="claude-opus-4.8",
+        messages=[
+            {"role": "system", "content": "你是一名资深代码审查员，只指出真实缺陷。"},
+            {"role": "user", "content": "审查这段 Go 代码的并发安全性。"},
+        ],
+        max_tokens=2048,
+        temperature=0.2,
+    )
+    print(resp.choices[0].message.content)
+    ```
+  </Tab>
+</Tabs>
+
+### 02 · 流式输出
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-5",
+    "messages": [{ "role": "user", "content": "解释 CAP 定理" }],
+    "max_tokens": 1024,
+    "stream": true
+  }'
+```
+
+### 03 · 扩展思考（Extended Thinking）
+
+开启后模型先输出思考过程再给结论，适合数学推导、复杂重构等任务。
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-opus-4.8",
+    "messages": [{ "role": "user", "content": "设计一个支持乱序到达的幂等消息消费方案" }],
+    "max_tokens": 16384,
+    "thinking": { "type": "enabled", "budget_tokens": 8192 }
+  }'
+```
+
+<Callout type="warn">
+  `budget_tokens` 必须小于 `max_tokens`，否则上游返回 `400`。开启思考时 Anthropic 要求 `temperature` 固定为
+  `1`（或不传），同时传入其他温度值会被拒绝。思考内容通过 `message.reasoning_content`（流式为
+  `delta.reasoning_content`）返回，并计入输出 token 计费。
+</Callout>
+
+### 04 · 工具调用
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-opus-4.8",
+    "messages": [{ "role": "user", "content": "查一下订单 A1001 的物流状态" }],
+    "max_tokens": 1024,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "query_logistics",
+          "description": "按订单号查询物流状态",
+          "parameters": {
+            "type": "object",
+            "properties": { "order_id": { "type": "string" } },
+            "required": ["order_id"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto"
+  }'
+```
+
+工具结果同样以 `{ "role": "tool", "tool_call_id": "...", "content": "..." }` 追加回 `messages`，网关会转换为
+上游的 `tool_result` 内容块。
+
+### 05 · 多模态图文输入
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-opus-4.8",
+    "messages": [{
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "把这张表格转成 CSV" },
+        { "type": "image_url", "image_url": { "url": "https://cdn.example.com/table.png" } }
+      ]
+    }],
+    "max_tokens": 4096
+  }'
+```
+
+## 03 · 响应结构
+
+响应已由网关转换回 OpenAI 格式：
+
+```json
+{
+  "id": "chatcmpl-7c1e4d5f608a1b2c",
+  "object": "chat.completion",
+  "created": 1721900000,
+  "model": "claude-opus-4.8",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "...",
+        "reasoning_content": "（开启 thinking 时才有）"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 128, "completion_tokens": 642, "total_tokens": 770 }
+}
+```
+
+`finish_reason` 由上游 `stop_reason` 映射而来：`end_turn → stop`、`max_tokens → length`、
+`tool_use → tool_calls`、`stop_sequence → stop`。
+
+<Callout type="warn">
+  Anthropic 上游不返回 `n > 1` 的多候选，`choices` 恒为单项。`usage` 中的缓存命中信息（若上游返回
+  `cache_read_input_tokens`）会一并透出在 `usage` 的扩展字段中，计费按实际读取量结算。
+</Callout>
+
+## 04 · 附录
+
+### 错误码
+
+| 状态码 | 说明 |
 | --- | --- |
-| `claude-opus-4.8` | Claude CLI 可用模型 |
-| `claude-sonnet-5` | Claude CLI 可用模型 |
+| `200` | 请求成功 |
+| `400` | 参数错误 · `invalid_request`（常见于 `temperature > 1`、消息未交替、`budget_tokens ≥ max_tokens`） |
+| `401` | 令牌无效 · `invalid_api_key` |
+| `402` | 额度不足 · `insufficient_user_quota` |
+| `404` | 模型不存在或令牌分组无权访问 |
+| `429` | 触发限流 · `rate_limit_exceeded` |
+| `529` | 上游过载（Anthropic `overloaded_error`），建议指数退避重试 |
+| `500` | 上游 / 网关内部错误 |
 
-## 对接必读
+错误体统一为 `{"error": {"message", "type", "param", "code"}}`。
 
-_TODO：与 OpenAI 标准的差异点（system 独立字段等）将在此补充。_
+### 速查
 
-## API 参考
+<Tabs items={['完整参数请求体', '字段速查', '鉴权头']}>
+  <Tab value="完整参数请求体">
+    ```json
+    {
+      "model": "claude-opus-4.8",
+      "messages": [
+        { "role": "system", "content": "..." },
+        { "role": "user", "content": "..." }
+      ],
+      "max_tokens": 8192,
+      "temperature": 1,
+      "top_p": 1,
+      "top_k": 40,
+      "stop": ["\n\nHuman:"],
+      "stream": true,
+      "thinking": { "type": "enabled", "budget_tokens": 4096 },
+      "tools": [{ "type": "function", "function": { "name": "...", "parameters": {} } }],
+      "tool_choice": "auto",
+      "user": "u_10086"
+    }
+    ```
+  </Tab>
+  <Tab value="字段速查">
+    ```text
+    model         claude-opus-4.8
+                  / claude-sonnet-5
+    temperature   0~1（注意上限为 1）
+    max_tokens    建议显式传入
+    top_k         Anthropic 专属
+    thinking      budget_tokens < max_tokens
+    不支持         n / presence_penalty
+                  / frequency_penalty / seed
+                  / response_format
+    消息约束       user / assistant 严格交替
+    ```
+  </Tab>
+  <Tab value="鉴权头">
+    ```text
+    Authorization: Bearer sk-xxxxxxxxxxxx
+    # 或（Anthropic SDK 风格）
+    x-api-key: sk-xxxxxxxxxxxx
+    ```
+  </Tab>
+</Tabs>
 
-参见 [Claude 系列 API 参考](/docs/text/reference/claude)。
+---
+
+bytestream · anthropic 渠道 · Claude 系列接入文档 —— 本文档为接入示例（非官方最终版），供接口联调参考。

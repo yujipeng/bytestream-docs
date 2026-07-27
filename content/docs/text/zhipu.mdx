@@ -1,24 +1,314 @@
 ---
 title: 智谱系列
-description: glm-5.2 / glm-5.1 / glm-5 的 bytestream 对接说明
+description: glm-5.2 / glm-5.1 / glm-5 的 bytestream 接入指南
 ---
 
-<Callout type="warn" title="内容撰写中">
-  本页为框架骨架，具体的对接必读、模型专属参数、请求/响应示例由后续内容里程碑补充。下方 API 参考区块已可用。
+本页覆盖 **glm-5.2 / glm-5.1 / glm-5** 在 bytestream 网关（`https://aiapi.bytestream.com.cn/`）下的完整接入
+方式：全部请求参数、智谱专属的思考模式与联网搜索工具、响应结构差异，附 5 组端到端请求组合示例。通用的
+鉴权、端点与错误码约定见 [通用说明](/docs/text)。
+
+| 调用端点 | 可用模型 | 请求组合示例 |
+| --- | --- | --- |
+| 1 | 3 | 5 |
+
+## 概览
+
+bytestream 通过 `zhipu` 渠道对接智谱开放平台 GLM 系列模型，请求以 OpenAI 兼容格式提交，由网关转换为上游
+`POST /api/paas/v4/chat/completions` 调用。可用模型：
+
+- **glm-5.2** · 最新旗舰档位
+- **glm-5.1** · 上一代旗舰档位
+- **glm-5** · 基础档位
+
+<Callout type="info">
+  **glm-5.2：** 当前最强档位，长上下文、代码与 Agent 工具调用能力最优；支持 `thinking` 思考模式与
+  `web_search` 联网检索工具。
 </Callout>
 
-## 模型清单
+<Callout type="info">
+  **glm-5.1：** 上一代旗舰，能力接近 5.2 而单价更低，适合已在生产验证过 prompt、追求成本稳定的存量业务。
+</Callout>
 
-| 模型 | 说明 |
+<Callout type="info">
+  **glm-5：** 基础档位，响应最快、单价最低，适合分类、抽取、改写等轻量高并发任务；思考模式在该档位下按上游
+  实现可能不生效，推理类能力建议使用 `glm-5.1` 及以上档位。
+</Callout>
+
+## 鉴权
+
+请求头携带 `Authorization: Bearer sk-xxxxxxxx`（`sk-` 前缀可省略）。令牌需在「控制台 → 令牌管理」中绑定
+可访问 `glm-5.2` / `glm-5.1` / `glm-5` 的分组。
+
+## 调用端点
+
+| 端点 | 请求体 | 响应 | 适用场景 |
+| --- | --- | --- | --- |
+| `POST /v1/chat/completions` | JSON | `chat.completion` / SSE chunk | 全部 OpenAI 兼容调用方 |
+
+## 01 · 请求参数详解
+
+### 顶层参数
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `model` | string | 必填 | `glm-5.2` / `glm-5.1` / `glm-5`。 |
+| `messages` | array\<object\> | 必填 | 对话消息数组，`role` 取值 `system` / `user` / `assistant` / `tool`。 |
+| `stream` | boolean | 可选 | 是否流式返回，默认 `false`。 |
+| `temperature` | number | 可选 | 采样温度，**智谱侧有效范围为 `(0, 1)` 开区间**，默认约 `0.75`；传 `0` 会被上游拒绝，需要接近确定性的输出请取一个足够小的正数（如 `0.01`）。 |
+| `top_p` | number | 可选 | 核采样阈值，同为 `(0, 1)` 开区间，默认约 `0.9`。 |
+| `max_tokens` | integer | 可选 | 最大输出 token 数。 |
+| `stop` | array\<string\> | 可选 | 停止序列。**智谱上游仅支持 1 个停止词**，传入多个会被拒绝或只取首项。 |
+| `thinking` | object | 可选 | 思考模式开关：`{ "type": "enabled" }` 开启、`{ "type": "disabled" }` 关闭；思考内容通过 `reasoning_content` 返回。 |
+| `do_sample` | boolean | 可选 | 是否启用采样，默认 `true`；置为 `false` 时 `temperature` / `top_p` 失效，走贪心解码。 |
+| `tools` | array\<object\> | 可选 | 工具列表，支持 `{ "type": "function", ... }` 函数调用与 `{ "type": "web_search", ... }` 联网检索。 |
+| `tool_choice` | string \| object | 可选 | 工具选择策略：`auto`（默认）/ `none`，或指定具体函数。 |
+| `request_id` | string | 可选 | 调用方自定义的请求唯一标识，便于与上游日志对齐排障；不传则由上游生成。 |
+| `user_id` | string | 可选 | 终端用户标识（智谱风格字段名）；同时兼容 OpenAI 风格的 `user`。 |
+
+<Callout type="warn" title="与 OpenAI 标准的差异点">
+  1. `temperature` / `top_p` 为**开区间** `(0, 1)`，不接受 `0` 与 `1`，也不接受大于 1 的值。
+  2. `stop` 仅支持单个停止词。
+  3. `n`（多候选）、`presence_penalty`、`frequency_penalty` 在上游不支持，传入会被忽略。
+  4. 智谱专属的 `do_sample` / `request_id` / `user_id` 不在 OpenAI 标准中，由网关透传给上游。
+</Callout>
+
+### 联网搜索工具（web_search）
+
+作为 `tools` 数组中的一项传入，开启后模型在生成前先检索网页：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `type` | string | 固定为 `"web_search"` |
+| `web_search.enable` | boolean | 是否启用，默认 `true`。 |
+| `web_search.search_query` | string | 自定义检索关键词；不传则由模型自行从对话中提取。 |
+| `web_search.search_result` | boolean | 是否在响应中返回引用的网页列表，默认 `false`。 |
+
+## 02 · 请求组合示例
+
+### 01 · 基础对话（非流式）
+
+<Tabs items={['cURL', 'Python']}>
+  <Tab value="cURL">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "glm-5.2",
+        "messages": [
+          { "role": "system", "content": "你是一名中文技术写作助手。" },
+          { "role": "user", "content": "把这段发布说明改写得更简洁。" }
+        ],
+        "temperature": 0.6,
+        "max_tokens": 1024
+      }'
+    ```
+  </Tab>
+  <Tab value="Python">
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key="sk-your-token",
+        base_url="https://aiapi.bytestream.com.cn/v1",
+    )
+
+    resp = client.chat.completions.create(
+        model="glm-5.2",
+        messages=[
+            {"role": "system", "content": "你是一名中文技术写作助手。"},
+            {"role": "user", "content": "把这段发布说明改写得更简洁。"},
+        ],
+        temperature=0.6,
+        max_tokens=1024,
+    )
+    print(resp.choices[0].message.content)
+    ```
+  </Tab>
+</Tabs>
+
+### 02 · 流式输出
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "glm-5.1",
+    "messages": [{ "role": "user", "content": "介绍一下向量数据库的选型要点" }],
+    "stream": true
+  }'
+```
+
+### 03 · 思考模式（thinking）
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "glm-5.2",
+    "messages": [{ "role": "user", "content": "推导这段 SQL 慢查询的根因并给出索引方案" }],
+    "thinking": { "type": "enabled" },
+    "max_tokens": 4096
+  }'
+```
+
+<Callout type="info">
+  思考过程位于 `message.reasoning_content`（流式为 `delta.reasoning_content`），与正文 `content` 分开返回，
+  计入输出 token。不需要推理的轻量任务显式传 `{ "type": "disabled" }` 可降低延迟与成本。
+</Callout>
+
+### 04 · 联网搜索
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "glm-5.2",
+    "messages": [{ "role": "user", "content": "总结本周国内 AI 领域的重要发布" }],
+    "tools": [
+      {
+        "type": "web_search",
+        "web_search": { "enable": true, "search_result": true }
+      }
+    ]
+  }'
+```
+
+### 05 · 函数调用 + 贪心解码
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "glm-5.2",
+    "messages": [{ "role": "user", "content": "帮我把这条工单分派给对应负责人" }],
+    "do_sample": false,
+    "request_id": "req-20260727-0001",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "assign_ticket",
+          "description": "把工单分派给指定负责人",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "ticket_id": { "type": "string" },
+              "owner": { "type": "string" }
+            },
+            "required": ["ticket_id", "owner"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto"
+  }'
+```
+
+<Callout type="warn">
+  `do_sample: false` 时不要再传 `temperature` / `top_p`，两者会被忽略；需要可复现输出时优先使用该字段，而不是
+  把 `temperature` 压到 `0`（智谱不接受 `0`）。
+</Callout>
+
+## 03 · 响应结构
+
+```json
+{
+  "id": "chatcmpl-4d5f608a1b2c3d4e",
+  "object": "chat.completion",
+  "created": 1721900000,
+  "model": "glm-5.2",
+  "request_id": "req-20260727-0001",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "...",
+        "reasoning_content": "（开启 thinking 时才有）"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 96, "completion_tokens": 401, "total_tokens": 497 }
+}
+```
+
+`finish_reason` 取值：`stop` / `length` / `tool_calls` / `sensitive`（内容安全拦截）/ `network_error`
+（上游检索或网络异常）。后两个为智谱特有取值，OpenAI 客户端需按未知值兜底处理。
+
+<Callout type="warn">
+  开启 `web_search.search_result` 时，引用的网页列表位于响应的 `web_search` 字段（非 `choices` 内），标准
+  OpenAI SDK 的强类型模型可能忽略该字段，需要时请读取原始 JSON。
+</Callout>
+
+## 04 · 附录
+
+### 错误码
+
+| 状态码 | 说明 |
 | --- | --- |
-| `glm-5.2` | 智谱系列 |
-| `glm-5.1` | 智谱系列 |
-| `glm-5` | 智谱系列 |
+| `200` | 请求成功 |
+| `400` | 参数错误 · `invalid_request`（常见于 `temperature` 取 0 或 1、`stop` 传多项） |
+| `401` | 令牌无效 · `invalid_api_key` |
+| `402` | 额度不足 · `insufficient_user_quota` |
+| `404` | 模型不存在或令牌分组无权访问 |
+| `429` | 触发限流 · `rate_limit_exceeded` |
+| `500` | 上游 / 网关内部错误 |
 
-## 对接必读
+错误体统一为 `{"error": {"message", "type", "param", "code"}}`；内容安全拦截通常不返回错误码，而是以
+`finish_reason: "sensitive"` 结束本次生成。
 
-_TODO：与 OpenAI 标准的差异点将在此补充。_
+### 速查
 
-## API 参考
+<Tabs items={['完整参数请求体', '字段速查', '鉴权头']}>
+  <Tab value="完整参数请求体">
+    ```json
+    {
+      "model": "glm-5.2",
+      "messages": [{ "role": "user", "content": "..." }],
+      "stream": true,
+      "temperature": 0.75,
+      "top_p": 0.9,
+      "max_tokens": 4096,
+      "stop": ["\n\n"],
+      "do_sample": true,
+      "thinking": { "type": "enabled" },
+      "tools": [
+        { "type": "web_search", "web_search": { "enable": true, "search_result": true } }
+      ],
+      "tool_choice": "auto",
+      "request_id": "req-20260727-0001",
+      "user_id": "u_10086"
+    }
+    ```
+  </Tab>
+  <Tab value="字段速查">
+    ```text
+    model         glm-5.2 / glm-5.1 / glm-5
+    temperature   (0, 1) 开区间
+    top_p         (0, 1) 开区间
+    stop          仅支持 1 个停止词
+    thinking      enabled / disabled
+    do_sample     false → 贪心解码
+    tools         function / web_search
+    finish_reason stop/length/tool_calls
+                  /sensitive/network_error
+    不支持         n / presence_penalty
+                  / frequency_penalty
+    ```
+  </Tab>
+  <Tab value="鉴权头">
+    ```text
+    Authorization: Bearer sk-xxxxxxxxxxxx
+    ```
+  </Tab>
+</Tabs>
 
-参见 [智谱系列 API 参考](/docs/text/reference/zhipu)。
+---
+
+bytestream · zhipu 渠道 · 智谱 GLM 系列接入文档 —— 本文档为接入示例（非官方最终版），供接口联调参考。

@@ -1,24 +1,331 @@
 ---
 title: Deepseek 系列
-description: deepseek-v4-pro / deepseek-v4-flash 的 bytestream 对接说明
+description: deepseek-v4-pro / deepseek-v4-flash 的 bytestream 接入指南
 ---
 
-<Callout type="warn" title="内容撰写中">
-  本页为框架骨架，具体的对接必读（如 reasoning_content 字段）、模型专属参数、请求/响应示例由后续内容里程碑补充。
-  下方 API 参考区块已可用。
+本页覆盖 **deepseek-v4-pro / deepseek-v4-flash** 在 bytestream 网关（`https://aiapi.bytestream.com.cn/`）下的
+完整接入方式：全部请求参数、`reasoning_content` 思维链字段的正确处理方式、上下文硬盘缓存计费口径，附 5 组
+端到端请求组合示例。通用的鉴权、端点与错误码约定见 [通用说明](/docs/text)。
+
+| 调用端点 | 可用模型 | 请求组合示例 |
+| --- | --- | --- |
+| 1 | 2 | 5 |
+
+## 概览
+
+bytestream 通过 `deepseek` 渠道对接 DeepSeek 开放平台模型，请求以 OpenAI 兼容格式提交，转换为上游
+`POST /chat/completions` 调用。可用模型：
+
+- **deepseek-v4-pro** · 推理档位
+- **deepseek-v4-flash** · 快速档位
+
+<Callout type="info">
+  **deepseek-v4-pro：** 推理增强档位，会先输出思维链（`reasoning_content`）再给正式答案，适合数学推导、
+  复杂代码重构与需要可解释过程的分析任务；思维链 token 按输出计费，耗时明显高于 flash。
 </Callout>
 
-## 模型清单
+<Callout type="info">
+  **deepseek-v4-flash：** 快速档位，不输出思维链，响应快、单价低，适合对话、改写、抽取等常规任务与高并发
+  线上流量；参数集与 pro 兼容，切换 `model` 即可在"要过程"与"要速度"之间取舍。
+</Callout>
 
-| 模型 | 说明 |
+## 鉴权
+
+请求头携带 `Authorization: Bearer sk-xxxxxxxx`（`sk-` 前缀可省略）。令牌需在「控制台 → 令牌管理」中绑定
+可访问 `deepseek-v4-pro` / `deepseek-v4-flash` 的分组。
+
+## 调用端点
+
+| 端点 | 请求体 | 响应 | 适用场景 |
+| --- | --- | --- | --- |
+| `POST /v1/chat/completions` | JSON | `chat.completion` / SSE chunk | 全部 OpenAI 兼容调用方 |
+
+## 01 · 请求参数详解
+
+### 顶层参数
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `model` | string | 必填 | `deepseek-v4-pro` 或 `deepseek-v4-flash`。 |
+| `messages` | array\<object\> | 必填 | 对话消息数组，`role` 取值 `system` / `user` / `assistant` / `tool`。 |
+| `stream` | boolean | 可选 | 是否流式返回，默认 `false`。 |
+| `stream_options` | object | 可选 | `{ "include_usage": true }` 可在最后一个 chunk 中带回 `usage`。 |
+| `temperature` | number | 可选 | 采样温度，范围 `[0, 2]`，默认 `1`。**推理档位（pro）不支持该参数**，传入会被忽略。 |
+| `top_p` | number | 可选 | 核采样阈值，范围 `(0, 1]`，默认 `1`。同样在 pro 档位下无效。 |
+| `max_tokens` | integer | 可选 | 最大输出 token 数（含思维链）。pro 档位建议给足余量，否则思维链可能占满预算导致正文被截断。 |
+| `stop` | string \| array\<string\> | 可选 | 停止序列，最多 16 项。 |
+| `presence_penalty` | number | 可选 | 主题新鲜度惩罚，范围 `[-2, 2]`，默认 `0`；pro 档位下无效。 |
+| `frequency_penalty` | number | 可选 | 重复词惩罚，范围 `[-2, 2]`，默认 `0`；pro 档位下无效。 |
+| `response_format` | object | 可选 | `{ "type": "json_object" }` 强制 JSON 输出；**pro 档位不支持**。 |
+| `tools` | array\<object\> | 可选 | OpenAI 格式的函数定义列表。 |
+| `tool_choice` | string \| object | 可选 | `auto`（默认）/ `none` / `required`，或指定具体函数。 |
+| `logprobs` | boolean | 可选 | 是否返回 token 对数概率；pro 档位不支持。 |
+| `user` | string | 可选 | 终端用户标识，用于风控与用量追踪。 |
+
+<Callout type="warn" title="pro 档位的参数限制">
+  推理档位 `deepseek-v4-pro` **不支持** `temperature` / `top_p` / `presence_penalty` / `frequency_penalty` /
+  `response_format` / `logprobs`：传入这些字段不会报错，但对生成结果没有任何影响（上游直接忽略）。若你的
+  A/B 实验依赖调温度，请在 flash 档位上做。
+</Callout>
+
+<Callout type="warn" title="与 OpenAI 标准的其他差异点">
+  1. `n`（多候选）在上游不支持，`choices` 恒为单项。
+  2. `seed` 不支持，无法保证输出严格可复现。
+  3. 多出一个 `reasoning_content` 输出字段，回传规则有硬性要求（见下节）。
+</Callout>
+
+### reasoning_content · 思维链字段
+
+pro 档位在 `message` 中额外返回 `reasoning_content`，与正文 `content` 平级：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `message.reasoning_content` | string | 模型的思维链内容，非流式下一次性返回。 |
+| `delta.reasoning_content` | string | 流式下的思维链分片；**先推完全部思维链，再开始推 `delta.content`**。 |
+
+<Callout type="warn" title="多轮对话中必须剥离 reasoning_content">
+  把上一轮的 assistant 回复追加进 `messages` 时，**只能带 `content`，必须删掉 `reasoning_content`**。上游会对
+  含该字段的历史消息返回 `400 invalid_request`。这是接入 pro 档位时最常见的报错原因——直接把响应对象整体
+  塞回 `messages` 就会踩到。
+</Callout>
+
+## 02 · 请求组合示例
+
+### 01 · 基础对话（flash 档位，非流式）
+
+<Tabs items={['cURL', 'Python']}>
+  <Tab value="cURL">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "deepseek-v4-flash",
+        "messages": [
+          { "role": "system", "content": "你是一名简洁的技术助手。" },
+          { "role": "user", "content": "解释一下 MVCC。" }
+        ],
+        "temperature": 0.3,
+        "max_tokens": 1024
+      }'
+    ```
+  </Tab>
+  <Tab value="Python">
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key="sk-your-token",
+        base_url="https://aiapi.bytestream.com.cn/v1",
+    )
+
+    resp = client.chat.completions.create(
+        model="deepseek-v4-flash",
+        messages=[
+            {"role": "system", "content": "你是一名简洁的技术助手。"},
+            {"role": "user", "content": "解释一下 MVCC。"},
+        ],
+        temperature=0.3,
+        max_tokens=1024,
+    )
+    print(resp.choices[0].message.content)
+    ```
+  </Tab>
+</Tabs>
+
+### 02 · 推理档位 + 思维链（非流式）
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v4-pro",
+    "messages": [{ "role": "user", "content": "证明：任意连续 3 个正整数之积必能被 6 整除" }],
+    "max_tokens": 8192
+  }'
+```
+
+响应中 `message.reasoning_content` 为推导过程，`message.content` 为最终结论。
+
+### 03 · 流式解析思维链与正文
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v4-pro",
+    "messages": [{ "role": "user", "content": "定位这段死锁代码的成因" }],
+    "max_tokens": 8192,
+    "stream": true,
+    "stream_options": { "include_usage": true }
+  }'
+```
+
+```python
+for chunk in stream:
+    delta = chunk.choices[0].delta
+    # 思维链先到，全部推完后才开始推正文
+    if getattr(delta, "reasoning_content", None):
+        render_thinking(delta.reasoning_content)
+    elif delta.content:
+        render_answer(delta.content)
+```
+
+### 04 · 多轮对话（正确剥离思维链）
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v4-pro",
+    "messages": [
+      { "role": "user", "content": "第一问：这段代码为什么慢？" },
+      { "role": "assistant", "content": "（只保留上一轮的 content，不含 reasoning_content）" },
+      { "role": "user", "content": "第二问：怎么改？" }
+    ],
+    "max_tokens": 8192
+  }'
+```
+
+### 05 · 工具调用（flash 档位）
+
+```bash
+curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v4-flash",
+    "messages": [{ "role": "user", "content": "查询用户 u_10086 的会员等级" }],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_member_level",
+          "description": "按用户 ID 查询会员等级",
+          "parameters": {
+            "type": "object",
+            "properties": { "user_id": { "type": "string" } },
+            "required": ["user_id"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto"
+  }'
+```
+
+<Callout type="info">
+  工具调用建议放在 flash 档位：pro 档位虽然接受 `tools`，但思维链会显著增加首个 tool_call 的到达延迟，多轮
+  Agent 循环下累积开销较大。
+</Callout>
+
+## 03 · 响应结构
+
+```json
+{
+  "id": "chatcmpl-5f608a1b2c3d4e5f",
+  "object": "chat.completion",
+  "created": 1721900000,
+  "model": "deepseek-v4-pro",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "reasoning_content": "先考虑三个连续整数中必有一个被 3 整除……",
+        "content": "因此该乘积必能被 6 整除。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 64,
+    "completion_tokens": 812,
+    "total_tokens": 876,
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 64,
+    "completion_tokens_details": { "reasoning_tokens": 610 }
+  }
+}
+```
+
+`finish_reason` 取值：`stop` / `length` / `tool_calls` / `insufficient_system_resource`（上游资源不足，需重试）。
+
+<Callout type="warn" title="计费口径">
+  思维链 token 计入 `completion_tokens`，按输出价结算，细分量在
+  `completion_tokens_details.reasoning_tokens`。输入侧则区分缓存命中：`prompt_cache_hit_tokens` 按更低的缓存
+  命中单价结算，`prompt_cache_miss_tokens` 按标准输入价结算。缓存由上游自动管理（相同前缀的请求自动命中），
+  无需显式声明；把稳定的 system prompt 与长文档放在 `messages` 前部可提高命中率。
+</Callout>
+
+## 04 · 附录
+
+### 错误码
+
+| 状态码 | 说明 |
 | --- | --- |
-| `deepseek-v4-pro` | Deepseek 系列 |
-| `deepseek-v4-flash` | Deepseek 系列 |
+| `200` | 请求成功 |
+| `400` | 参数错误 · `invalid_request`（最常见：历史 assistant 消息中残留 `reasoning_content`） |
+| `401` | 令牌无效 · `invalid_api_key` |
+| `402` | 额度不足 · `insufficient_user_quota` |
+| `404` | 模型不存在或令牌分组无权访问 |
+| `429` | 触发限流 · `rate_limit_exceeded` |
+| `503` | 上游服务繁忙 · 建议指数退避重试 |
+| `500` | 上游 / 网关内部错误 |
 
-## 对接必读
+错误体统一为 `{"error": {"message", "type", "param", "code"}}`。
 
-_TODO：reasoning_content 字段等与 OpenAI 标准的差异点将在此补充。_
+### 速查
 
-## API 参考
+<Tabs items={['完整参数请求体', '字段速查', '鉴权头']}>
+  <Tab value="完整参数请求体">
+    ```json
+    {
+      "model": "deepseek-v4-flash",
+      "messages": [{ "role": "user", "content": "..." }],
+      "stream": true,
+      "stream_options": { "include_usage": true },
+      "temperature": 1,
+      "top_p": 1,
+      "max_tokens": 8192,
+      "stop": ["\n\n"],
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "response_format": { "type": "json_object" },
+      "tools": [{ "type": "function", "function": { "name": "...", "parameters": {} } }],
+      "tool_choice": "auto",
+      "logprobs": false,
+      "user": "u_10086"
+    }
+    ```
+  </Tab>
+  <Tab value="字段速查">
+    ```text
+    model          deepseek-v4-pro（思维链）
+                   / deepseek-v4-flash（快速）
+    temperature    [0, 2]，pro 档位无效
+    stop           最多 16 项
+    pro 档位不支持   temperature / top_p
+                   / presence_penalty
+                   / frequency_penalty
+                   / response_format / logprobs
+    reasoning_content
+                   回传历史时必须删除
+    不支持          n / seed
+    缓存计费        prompt_cache_hit_tokens
+                   / prompt_cache_miss_tokens
+    ```
+  </Tab>
+  <Tab value="鉴权头">
+    ```text
+    Authorization: Bearer sk-xxxxxxxxxxxx
+    ```
+  </Tab>
+</Tabs>
 
-参见 [Deepseek 系列 API 参考](/docs/text/reference/deepseek)。
+---
+
+bytestream · deepseek 渠道 · Deepseek 系列接入文档 —— 本文档为接入示例（非官方最终版），供接口联调参考。

@@ -11,13 +11,6 @@ function yamlFiles(dir) {
 }
 
 await generateFiles({
-  input: createOpenAPI({ input: yamlFiles('./openapi/text') }),
-  output: './content/docs/text/reference',
-  per: 'file',
-  includeDescription: true,
-});
-
-await generateFiles({
   input: createOpenAPI({ input: yamlFiles('./openapi/video') }),
   output: './content/docs/video/reference',
   per: 'file',

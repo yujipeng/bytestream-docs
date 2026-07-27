@@ -8,5 +8,5 @@ function yamlFiles(dir: string) {
 }
 
 export const openapi = createOpenAPI({
-  input: [...yamlFiles('./openapi/text'), ...yamlFiles('./openapi/video')],
+  input: yamlFiles('./openapi/video'),
 });
