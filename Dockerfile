@@ -31,9 +31,6 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
-# lib/openapi.ts 在模块加载时会 readdirSync('./openapi/{text,video}')；缺这个目录会导致
-# 未命中 generateStaticParams() 列表的 /docs/* 请求在按需渲染时抛出未捕获异常（500 而非 404）。
-COPY --from=builder /app/openapi ./openapi
 
 EXPOSE 3000
 CMD ["npm", "start"]
