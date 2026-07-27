@@ -1,12 +1,12 @@
 openapi: 3.1.0
 info:
   title: bytestream · Kimi 系列（文本生成）
-  version: 0.1.0-skeleton
+  version: 0.1.0
   license:
     name: Proprietary
   description: |
-    通过 bytestream 网关调用的 Kimi 系列模型。参考页壳，字段定义为骨架，
-    具体的模型专属参数（如思考模式开关）由后续内容里程碑补充。
+    通过 bytestream 网关调用的 Kimi 系列模型。部分模型服务端会强制 temperature=1.0，
+    详见 /docs/text/kimi。
 servers:
   - url: https://aiapi.bytestream.com.cn
     description: bytestream 网关
@@ -69,6 +69,7 @@ components:
           default: false
         temperature:
           type: number
+          description: 部分模型（2.6 世代部分档位）服务端会强制改写为 1.0，其余取值不受影响。
         max_tokens:
           type: integer
     ChatCompletionResponse:

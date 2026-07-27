@@ -1,24 +1,94 @@
 ---
 title: Kimi 系列
-description: kimi-2.7 / kimi-2.6 / kimi-2.5 的 bytestream 对接说明
+description: kimi-2.7 / kimi-2.6 / kimi-2.5 等综合能力档位模型的 bytestream 对接说明
 ---
 
-<Callout type="warn" title="内容撰写中">
-  本页为框架骨架，具体的对接必读（如思考模式参数）、模型专属参数、请求/响应示例由后续内容里程碑补充。
-  下方 API 参考区块已可用。
-</Callout>
+本页覆盖 bytestream 通过 `POST /v1/chat/completions`（见[通用说明](/docs/text)）暴露的 Kimi 系列模型。
+请求/响应外层结构与 OpenAI 标准一致，唯一需要注意的是下方「对接必读」中的 `temperature` 强制行为。
 
 ## 模型清单
 
 | 模型 | 说明 |
 | --- | --- |
-| `kimi-2.7` | Kimi 系列 |
-| `kimi-2.6` | Kimi 系列 |
-| `kimi-2.5` | Kimi 系列 |
+| `kimi-2.7` | 综合能力档位。bytestream 侧对外命名，通过「渠道 → 自定义模型」映射到上游具体模型，具体上游模型请以控制台当前配置为准。 |
+| `kimi-2.6` | 前一代综合能力档位，用法与 `kimi-2.7` 一致；部分该世代模型服务端会强制 `temperature=1.0`（见下方对接必读）。 |
+| `kimi-2.5` | 更早一代综合能力档位，用法与 `kimi-2.7` 一致。 |
 
 ## 对接必读
 
-_TODO：思考模式参数等与 OpenAI 标准的差异点将在此补充。_
+- **部分模型服务端强制 `temperature=1.0`**：网关对特定 Kimi 模型（`2.6` 世代部分档位）做了保护性处理——若请求
+  中传入的 `temperature` 不等于 `1.0`，会在转发前被强制改写为 `1.0`，其余取值不受影响。这是为规避该模型在
+  非默认温度下的已知稳定性问题；对接方无需自行判断是否命中，按正常业务需求传参即可，网关按需覆盖。
+- **其余请求/响应字段完全兼容 OpenAI 标准**，无需额外转换；如需思考过程，参考 Deepseek / 智谱 / 千问系列的
+  `reasoning_content` 字段用法，具体是否支持以模型实际能力为准。
+
+## 请求示例
+
+<Tabs items={['非流式请求', '流式请求']}>
+  <Tab value="非流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "kimi-2.7",
+        "messages": [
+          { "role": "user", "content": "用一句话介绍一下你自己" }
+        ]
+      }'
+    ```
+
+    响应：
+
+    ```json
+    {
+      "id": "chatcmpl-e52c7b3a",
+      "object": "chat.completion",
+      "created": 1738000500,
+      "model": "kimi-2.7",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "我是 Kimi，一个由月之暗面研发、擅长长文本理解的智能助手。"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": { "prompt_tokens": 12, "completion_tokens": 22, "total_tokens": 34 }
+    }
+    ```
+  </Tab>
+  <Tab value="流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "kimi-2.7",
+        "messages": [
+          { "role": "user", "content": "用一句话介绍一下你自己" }
+        ],
+        "stream": true
+      }'
+    ```
+
+    响应（`text/event-stream`，逐块推送）：
+
+    ```
+    data: {"id":"chatcmpl-e52c7b3a","object":"chat.completion.chunk","created":1738000500,"model":"kimi-2.7","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-e52c7b3a","object":"chat.completion.chunk","created":1738000500,"model":"kimi-2.7","choices":[{"index":0,"delta":{"content":"我是 Kimi，一个由月之暗面研发"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-e52c7b3a","object":"chat.completion.chunk","created":1738000500,"model":"kimi-2.7","choices":[{"index":0,"delta":{"content":"、擅长长文本理解的智能助手。"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-e52c7b3a","object":"chat.completion.chunk","created":1738000500,"model":"kimi-2.7","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+    data: [DONE]
+    ```
+  </Tab>
+</Tabs>
 
 ## API 参考
 

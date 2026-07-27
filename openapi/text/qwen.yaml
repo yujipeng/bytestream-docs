@@ -1,12 +1,13 @@
 openapi: 3.1.0
 info:
   title: bytestream · 千问 Qwen 系列（文本生成）
-  version: 0.1.0-skeleton
+  version: 0.1.0
   license:
     name: Proprietary
   description: |
-    通过 bytestream 网关调用的千问 Qwen 系列模型。参考页壳，字段定义为骨架，
-    具体的模型专属参数（如思考模式开关）由后续内容里程碑补充。
+    通过 bytestream 网关调用的千问 Qwen 系列模型。支持通过 enable_thinking 参数开启思考模式
+    （部分模型仅支持流式场景开启），思考内容通过响应中的 reasoning_content 字段返回，
+    详见 /docs/text/qwen。
 servers:
   - url: https://aiapi.bytestream.com.cn
     description: bytestream 网关
@@ -66,6 +67,9 @@ components:
         stream:
           type: boolean
           default: false
+        enable_thinking:
+          type: boolean
+          description: 开启思考模式。原样转发给上游；部分模型仅在 stream=true 时支持开启。
         temperature:
           type: number
         max_tokens:
@@ -94,6 +98,9 @@ components:
                 properties:
                   role:
                     type: string
+                  reasoning_content:
+                    type: string
+                    description: 开启思考模式后返回的思考过程，与最终答案 content 分开返回。
                   content:
                     type: string
               finish_reason:

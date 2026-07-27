@@ -1,23 +1,98 @@
 ---
 title: 千问系列
-description: qwen3.7-max / qwen3.7-plus 的 bytestream 对接说明
+description: qwen3.7-max / qwen3.7-plus 等综合能力档位模型的 bytestream 对接说明
 ---
 
-<Callout type="warn" title="内容撰写中">
-  本页为框架骨架，具体的对接必读（如思考模式参数）、模型专属参数、请求/响应示例由后续内容里程碑补充。
-  下方 API 参考区块已可用。
-</Callout>
+本页覆盖 bytestream 通过 `POST /v1/chat/completions`（见[通用说明](/docs/text)）暴露的千问（Qwen）系列模型。
+请求/响应外层结构与 OpenAI 标准一致，唯一需要注意的是下方「对接必读」中的思考模式参数与 `top_p` 边界处理。
 
 ## 模型清单
 
 | 模型 | 说明 |
 | --- | --- |
-| `qwen3.7-max` | 千问系列 |
-| `qwen3.7-plus` | 千问系列 |
+| `qwen3.7-max` | 综合能力档位。bytestream 侧对外命名，通过「渠道 → 自定义模型」映射到上游具体模型，具体上游模型请以控制台当前配置为准。 |
+| `qwen3.7-plus` | 性价比档位，用法与 `qwen3.7-max` 一致。 |
 
 ## 对接必读
 
-_TODO：思考模式参数等与 OpenAI 标准的差异点将在此补充。_
+- **`enable_thinking` 参数控制思考模式**：在请求体顶层传入 `enable_thinking: true` 可开启思考过程，网关按
+  OpenAI 兼容层原样转发给上游，不做转换；未传入时使用模型默认行为。**流式与非流式的可用性不同**——多数千问
+  思考模型仅支持在 `stream: true` 时开启思考模式，非流式请求下开启 `enable_thinking` 可能被上游拒绝，如遇到
+  该情况请改为流式调用，或不传 `enable_thinking` 使用默认（非思考）模式。
+- **思考内容通过 `reasoning_content` 返回**：开启思考模式后，响应中会额外携带 `reasoning_content` 字段
+  （非流式位于 `choices[].message.reasoning_content`；流式位于每个分块的 `choices[].delta.reasoning_content`），
+  与最终答案的 `content` 字段分开返回，用法与 Deepseek / 智谱系列一致。
+- **`top_p` 取值边界**：网关会将 `top_p >= 1` 的取值收敛为 `0.999`、`top_p <= 0` 的取值收敛为 `0.001` 后再转发
+  给上游（上游要求 `top_p` 严格落在开区间 `(0, 1)` 内），对接方按 OpenAI 标准传参即可，无需自行处理边界值。
+
+## 请求示例
+
+<Tabs items={['非流式请求', '流式请求']}>
+  <Tab value="非流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "qwen3.7-max",
+        "messages": [
+          { "role": "user", "content": "用一句话介绍一下你自己" }
+        ]
+      }'
+    ```
+
+    响应：
+
+    ```json
+    {
+      "id": "chatcmpl-d41b6a2f",
+      "object": "chat.completion",
+      "created": 1738000400,
+      "model": "qwen3.7-max",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "我是通义千问，一个由阿里云研发的超大规模语言模型。"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": { "prompt_tokens": 12, "completion_tokens": 20, "total_tokens": 32 }
+    }
+    ```
+  </Tab>
+  <Tab value="流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "qwen3.7-max",
+        "enable_thinking": true,
+        "messages": [
+          { "role": "user", "content": "用一句话介绍一下你自己" }
+        ],
+        "stream": true
+      }'
+    ```
+
+    响应（`text/event-stream`，`reasoning_content` 分块先于 `content` 分块推送）：
+
+    ```
+    data: {"id":"chatcmpl-d41b6a2f","object":"chat.completion.chunk","created":1738000400,"model":"qwen3.7-max","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":""},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-d41b6a2f","object":"chat.completion.chunk","created":1738000400,"model":"qwen3.7-max","choices":[{"index":0,"delta":{"reasoning_content":"用户要求做一句话自我介绍，需概括模型来源与定位。"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-d41b6a2f","object":"chat.completion.chunk","created":1738000400,"model":"qwen3.7-max","choices":[{"index":0,"delta":{"content":"我是通义千问，一个由阿里云研发的超大规模语言模型。"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-d41b6a2f","object":"chat.completion.chunk","created":1738000400,"model":"qwen3.7-max","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+    data: [DONE]
+    ```
+  </Tab>
+</Tabs>
 
 ## API 参考
 

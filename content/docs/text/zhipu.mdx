@@ -1,23 +1,100 @@
 ---
 title: 智谱系列
-description: glm-5.2 / glm-5.1 / glm-5 的 bytestream 对接说明
+description: glm-5.2 / glm-5.1 / glm-5 等综合能力档位模型的 bytestream 对接说明
 ---
 
-<Callout type="warn" title="内容撰写中">
-  本页为框架骨架，具体的对接必读、模型专属参数、请求/响应示例由后续内容里程碑补充。下方 API 参考区块已可用。
-</Callout>
+本页覆盖 bytestream 通过 `POST /v1/chat/completions`（见[通用说明](/docs/text)）暴露的智谱（GLM）系列模型。
+本系列走的是 GLM-4 及以上世代的 OpenAI 兼容接口路径，请求/响应结构与 OpenAI 标准一致，唯一需要注意的是本页
+「对接必读」中的思考模式字段。
 
 ## 模型清单
 
 | 模型 | 说明 |
 | --- | --- |
-| `glm-5.2` | 智谱系列 |
-| `glm-5.1` | 智谱系列 |
-| `glm-5` | 智谱系列 |
+| `glm-5.2` | 综合能力档位。bytestream 侧对外命名，通过「渠道 → 自定义模型」映射到上游具体模型，具体上游模型请以控制台当前配置为准。 |
+| `glm-5.1` | 前一代综合能力档位，用法与 `glm-5.2` 一致。 |
+| `glm-5` | 更早一代综合能力档位，用法与 `glm-5.2` 一致。 |
 
 ## 对接必读
 
-_TODO：与 OpenAI 标准的差异点将在此补充。_
+- **`thinking` 参数控制思考模式**：新一代 GLM 模型支持在请求体中传入 `thinking` 对象来开启/关闭思考过程
+  （如 `{"thinking": {"type": "enabled"}}`），网关按 OpenAI 兼容层直接转发该字段给上游，不做转换或校验，
+  未显式传入时使用模型默认行为。
+- **思考内容通过 `reasoning_content` 返回**：开启思考模式后，响应中会额外携带 `reasoning_content` 字段
+  （非流式位于 `choices[].message.reasoning_content`；流式位于每个分块的 `choices[].delta.reasoning_content`），
+  与最终答案的 `content` 字段分开返回，用法与 Deepseek 系列一致（见[Deepseek 系列](/docs/text/deepseek)）。
+- **其余请求/响应字段完全兼容 OpenAI 标准**，无需额外转换。
+
+## 请求示例
+
+<Tabs items={['非流式请求', '流式请求']}>
+  <Tab value="非流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "glm-5.2",
+        "thinking": { "type": "enabled" },
+        "messages": [
+          { "role": "user", "content": "用一句话介绍一下你自己" }
+        ]
+      }'
+    ```
+
+    响应（含 `reasoning_content`）：
+
+    ```json
+    {
+      "id": "chatcmpl-c30a5f1e",
+      "object": "chat.completion",
+      "created": 1738000300,
+      "model": "glm-5.2",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "reasoning_content": "用户要求做一句话自我介绍，需简洁概括模型定位与能力，避免展开细节。",
+            "content": "我是智谱 GLM，一个专注中文理解与多任务处理的对话助手。"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": { "prompt_tokens": 13, "completion_tokens": 30, "total_tokens": 43 }
+    }
+    ```
+  </Tab>
+  <Tab value="流式请求">
+    ```bash
+    curl https://aiapi.bytestream.com.cn/v1/chat/completions \
+      -H "Authorization: Bearer sk-your-token" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "glm-5.2",
+        "thinking": { "type": "enabled" },
+        "messages": [
+          { "role": "user", "content": "用一句话介绍一下你自己" }
+        ],
+        "stream": true
+      }'
+    ```
+
+    响应（`text/event-stream`，`reasoning_content` 分块先于 `content` 分块推送）：
+
+    ```
+    data: {"id":"chatcmpl-c30a5f1e","object":"chat.completion.chunk","created":1738000300,"model":"glm-5.2","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":""},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-c30a5f1e","object":"chat.completion.chunk","created":1738000300,"model":"glm-5.2","choices":[{"index":0,"delta":{"reasoning_content":"用户要求做一句话自我介绍……"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-c30a5f1e","object":"chat.completion.chunk","created":1738000300,"model":"glm-5.2","choices":[{"index":0,"delta":{"content":"我是智谱 GLM，一个专注中文理解与多任务处理的对话助手。"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-c30a5f1e","object":"chat.completion.chunk","created":1738000300,"model":"glm-5.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+    data: [DONE]
+    ```
+  </Tab>
+</Tabs>
 
 ## API 参考
 

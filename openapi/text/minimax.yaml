@@ -1,12 +1,12 @@
 openapi: 3.1.0
 info:
   title: bytestream · MiniMax 系列（文本生成）
-  version: 0.1.0-skeleton
+  version: 0.1.0
   license:
     name: Proprietary
   description: |
-    通过 bytestream 网关调用的 MiniMax 系列模型。参考页壳，字段定义为骨架，
-    具体的模型专属参数由后续内容里程碑补充。
+    通过 bytestream 网关调用的 MiniMax 系列模型。请求/响应结构与 OpenAI 标准完全兼容，
+    详见 /docs/text/minimax。
 servers:
   - url: https://aiapi.bytestream.com.cn
     description: bytestream 网关
