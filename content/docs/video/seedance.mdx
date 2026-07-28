@@ -139,7 +139,7 @@ bytestream 的顶层 `images` 字段只能表达"若干张参考图、不区分�
 | --- | --- | --- |
 | `type` | string | `"text"` / `"image_url"` / `"video_url"` / `"audio_url"` |
 | `text` | string | 当 `type="text"` 时的文本内容（一般无需手写，`prompt` 字段会自动追加一条文本项）。 |
-| `image_url.url` | string | 图片地址，当 `type="image_url"` 时使用；可以是公网 URL、base64 字符串，或素材审核后返回的 `asset://` ID。 |
+| `image_url.url` | string | 图片地址，当 `type="image_url"` 时使用；可以是公网 URL、base64 字符串，或素材库返回的 `asset://` ID（见「素材库」一节）。 |
 | `video_url.url` | string | 视频地址，当 `type="video_url"` 时使用（参考视频，1.8s~15.2s，分辨率 480P~720P，不可含真人）。 |
 | `audio_url.url` | string | 音频地址，当 `type="audio_url"` 时使用（参考音频，总时长 ≤15s，需配合参考图片/视频）。 |
 | `role` | string | 可选角色标记。`image_url` 项支持 `first_frame` / `last_frame` / `reference_image`；`video_url` 项对应 `reference_video`（仅标准版 2.0 支持）；`audio_url` 项对应 `reference_audio`。 |
@@ -305,7 +305,171 @@ curl https://aiapi.bytestream.com.cn/v1/videos \
   最终真源。
 </Callout>
 
-## 03 · 任务状态查询
+## 03 · 素材库
+
+在提交生成任务之前，可先通过素材库接口把图片/视频等素材上传或登记到 bytestream 素材管理服务，得到稳定的
+`asset://` 引用后再填入 `metadata.content[].image_url.url` 等字段——相比每次直接传公网 URL，素材库登记的资源
+可复用、可在控制台追溯，并支持按类型（`image_people` / `image_environment` / `video` / `audio` / `text`）分类
+检索。
+
+<Callout type="info">
+  素材库接口与「01 · 请求参数详解」中的视频生成接口相互独立，走独立的 `/assets-manager/*` 路由，鉴权方式
+  相同（`Authorization: Bearer sk-xxxxxxxx`），但不占用视频生成的 RPM/TPM 配额。
+</Callout>
+
+### `GET /assets-manager/list-assets`
+
+查询当前账号下的素材列表，支持分页与按类型筛选。
+
+```bash
+curl -X GET https://aiapi.bytestream.com.cn/assets-manager/list-assets \
+  -H "Authorization: Bearer sk-your-token"
+```
+
+| 参数 | 位置 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- | --- |
+| `kind` | query | string | 可选 | 按素材类型筛选：`all`（默认）/ `image_people` / `image_environment` / `video` / `audio` / `text`。 |
+| `page` | query | integer | 可选 | 页码，默认 `1`。 |
+| `pageSize` | query | integer | 可选 | 每页数量，默认 `12`。 |
+
+响应：
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "dla-mqs3175g-qg2yp9",
+        "developerId": "cmqeuyh3h0008tdxa8xg2qzks",
+        "kind": "image",
+        "createdBy": "openapi_task_auto_ingest",
+        "sourceScope": "task_auto_ingest",
+        "retentionMode": "temporary",
+        "expiresAt": null,
+        "lastUsedAt": "2026-06-24T13:01:38.548Z",
+        "imageCategory": "image_people",
+        "fileHash": "bc227c241de46912db071b538bc647e8be0977cb40bea2bff01489aa90c9ffed",
+        "name": "i2v_foxrgirl.png",
+        "previewUrl": "https://...",
+        "sourceUrl": "https://...",
+        "mimeType": "image/png",
+        "sizeBytes": 1951177,
+        "status": "ready",
+        "rawPayload": {
+          "importCompletedAt": "2026-06-24T13:01:43.253Z",
+          "uploaded": {
+            "originalName": "i2v_foxrgirl.png",
+            "mimeType": "image/png",
+            "sizeBytes": 1951177
+          }
+        },
+        "createdAt": "2026-06-24T13:01:38.548Z",
+        "updatedAt": "2026-06-24T13:01:43.355Z",
+        "groupId": "group-20260624210141-5mfjc",
+        "assetId": "asset-20260624210143-fsr6v",
+        "assetUrl": "asset://asset-20260624210143-fsr6v"
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "pageSize": 12,
+    "totalPages": 1,
+    "summary": { "used": 1, "limit": 100, "remaining": 99 },
+    "filters": {
+      "kinds": ["all", "image_people", "image_environment", "video", "audio", "text"],
+      "activeKind": "all"
+    }
+  }
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `data.items[].assetUrl` | 即可直接填入 Seedance 请求 `metadata.content[].image_url.url` 等字段的 `asset://` 引用。 |
+| `data.items[].retentionMode` | `temporary`（有 `expiresAt` 过期时间，任务自动摄入产生）或 `permanent`（长期保留，主动创建产生）。 |
+| `data.items[].status` | 素材处理状态：`pending`（待处理）/ `ready`（可用）/ 失败态以 `error` 相关字段为准。 |
+| `data.summary` | 当前账号素材配额使用情况：`used` 已用、`limit` 上限、`remaining` 剩余。 |
+
+<Callout type="warn" title="限流与分页">
+  未传 `kind` 时默认返回全部类型；账号素材配额（`summary.limit`）用满后新建素材会被拒绝，需先清理
+  `temporary` 类型的过期素材或联系管理员提升额度。
+</Callout>
+
+### `POST /assets-manager/create-asset`
+
+将一个外部 URL 上的素材登记为长期素材（`retentionMode: "permanent"`），返回登记后的 `asset://` 引用。
+
+```bash
+curl -X POST https://aiapi.bytestream.com.cn/assets-manager/create-asset \
+  -H "Authorization: Bearer sk-your-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kind": "image",
+    "imageCategory": "image_people",
+    "name": "无人机",
+    "url": "https://ark-project.tos-cn-beijing.volces.com/doc_image/seepro_i2v.png",
+    "mimeType": "image/png"
+  }'
+```
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `kind` | string | 必填 | 素材大类：`image` / `video` / `audio` / `text`。 |
+| `imageCategory` | string | `kind="image"` 时必填 | 图片子分类：`image_people`（人物）/ `image_environment`（环境）。 |
+| `name` | string | 必填 | 素材展示名称，可在控制台素材库中检索。 |
+| `url` | string | 必填 | 待登记素材的公网可访问 URL；服务端会拉取并落库。 |
+| `mimeType` | string | 必填 | 素材 MIME 类型，需与 `url` 指向的实际文件格式一致。 |
+
+响应：
+
+```json
+{
+  "success": true,
+  "data": {
+    "duplicated": false,
+    "asset": {
+      "id": "dla-mqut39b9-qe9oif",
+      "developerId": "cmqeuyh3h0008tdxa8xg2qzks",
+      "kind": "image",
+      "createdBy": "openapi_asset_import",
+      "sourceScope": "openapi_asset_import",
+      "retentionMode": "permanent",
+      "expiresAt": null,
+      "lastUsedAt": "2026-06-26T10:46:37.029Z",
+      "imageCategory": "image_people",
+      "fileHash": null,
+      "name": "无人机",
+      "previewUrl": null,
+      "sourceUrl": null,
+      "mimeType": "image/png",
+      "sizeBytes": null,
+      "status": "pending",
+      "rawPayload": {
+        "sourceType": "openapi_import",
+        "requestedMimeType": "image/png",
+        "originalSourceUrl": "https://ark-project.tos-cn-beijing.volces.com/doc_image/seepro_i2v.png"
+      },
+      "createdAt": "2026-06-26T10:46:37.029Z",
+      "updatedAt": "2026-06-26T10:46:37.029Z"
+    }
+  }
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `data.duplicated` | 若传入的 `url` 已登记过同一素材（按 `fileHash` 判重），返回 `true` 并复用已有素材，不会产生重复条目。 |
+| `data.asset.status` | 创建后初始为 `pending`，服务端异步拉取并处理源文件；处理完成后转为 `ready`，此时才建议在生成任务中引用。 |
+| `data.asset.id` | 内部素材 ID；与 `list-assets` 返回项的 `assetId` 对应，用于登记/查询接口之间关联同一条素材。 |
+
+<Callout type="info">
+  创建成功后素材状态可能仍为 `pending`（服务端异步拉取远端 URL 中），建议轮询 `list-assets` 并按 `id` 匹配，
+  确认对应素材 `status` 变为 `ready` 后再在 Seedance 请求的 `metadata.content` 中引用其 `asset://` 地址，避免
+  生成任务因素材未就绪而失败。
+</Callout>
+
+## 05 · 任务状态查询
 
 ### `GET /v1/videos/{task_id}`
 
@@ -332,7 +496,7 @@ OpenAI Video API 兼容格式查询，状态机：`queued → in_progress → co
   生成失败时错误信息位于 `error.message` / `error.code`。
 </Callout>
 
-## 04 · 附录
+## 06 · 附录
 
 ### 计费档位
 
